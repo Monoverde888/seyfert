@@ -5,12 +5,16 @@ import channelFrom from '../../structures/channels';
 import type { ReturnCache } from '../index';
 import { GuildRelatedResource } from './default/guild-related';
 
-export class Channels extends GuildRelatedResource {
+export class Channels extends GuildRelatedResource<any, APIChannel> {
 	namespace = 'channel';
 
 	parse(data: APIChannel, id: string, guild_id: string) {
 		const { permission_overwrites, ...rest } = super.parse(data, id, guild_id);
 		return rest;
+	}
+
+	raw(id: string): ReturnCache<APIChannel | undefined> {
+		return super.get(id);
 	}
 
 	override get(id: string): ReturnCache<AllChannels | undefined> {
