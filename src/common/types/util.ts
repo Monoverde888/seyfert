@@ -1,4 +1,4 @@
-import type { GatewayIntentBits, PermissionFlagsBits } from 'discord-api-types/v10';
+import type { GatewayIntentBits, PermissionFlagsBits } from '../../types';
 
 export type ToClass<T, This> = new (
 	...args: any[]
@@ -14,21 +14,33 @@ export type ToClass<T, This> = new (
 
 export type StringToNumber<T extends string> = T extends `${infer N extends number}` ? N : never;
 
-export type MakePartial<T, K extends keyof T> = Omit<T, K> & { [P in K]?: T[P] };
+export type PickPartial<T, K extends keyof T> = Omit<T, K> & { [P in K]?: T[P] };
+
+export type MakeDeepPartial<T, K extends keyof T> = Omit<T, K> & {
+	[P in K]?: DeepPartial<T[P]>;
+};
 
 export type DeepPartial<T> = {
-	[K in keyof T]?: T[K] extends Record<any, any>
-		? DeepPartial<T[K]>
-		: T[K] extends (infer I)[]
-			? DeepPartial<I>[]
-			: T[K];
+	[K in keyof T]?: T[K] extends (...args: any[]) => any
+		? T[K]
+		: T[K] extends Record<any, any>
+			? DeepPartial<T[K]>
+			: T[K] extends (infer I)[]
+				? DeepPartial<I>[]
+				: Partial<T[K]>;
 };
 
 export type OmitInsert<T, K extends keyof T, I> = I extends [] ? Omit<T, K> & I[number] : Omit<T, K> & I;
 
+export type RequireAtLeastOne<T, Keys extends keyof T = keyof T> = T & { [K in Keys]: Required<Pick<T, K>> }[Keys];
+
 export type IntentStrings = (keyof typeof GatewayIntentBits)[];
 
-export type PermissionStrings = (keyof typeof PermissionFlagsBits)[];
+export type PermissionStrings = (
+	| keyof typeof PermissionFlagsBits
+	| (typeof PermissionFlagsBits)[keyof typeof PermissionFlagsBits]
+	| bigint
+)[];
 
 export type RestOrArray<T> = T[] | [T[]];
 
@@ -44,6 +56,12 @@ export type StructPropState<Prop, State extends StructStates, Select extends Str
 	Prop,
 	Select
 >[State];
+
+export type PropWhen<Select extends StructStates, Prop, State extends StructStates = StructStates> = StructPropState<
+	Prop,
+	State,
+	Select
+>;
 
 export type WithID<More> = { id: string } & More;
 
@@ -71,23 +89,22 @@ export type When<T extends boolean, A, B = never> = T extends true ? A : B;
 
 export type AuxIsStrictlyUndefined<T> = T extends undefined | null | never | void ? true : false;
 
-export type IsStrictlyUndefined<T> = AuxIsStrictlyUndefined<T> extends true
-	? true
-	: AuxIsStrictlyUndefined<T> extends false
-		? false
-		: false;
+export type IsStrictlyUndefined<T> =
+	AuxIsStrictlyUndefined<T> extends true ? true : AuxIsStrictlyUndefined<T> extends false ? false : false;
 
 export type If<T extends boolean, A, B = null> = T extends true ? A : B extends null ? A | null : B;
 
-export type PickPartial<T, K extends keyof T> = {
-	[P in keyof T]?: T[P] | undefined;
-} & {
-	[P in K]: T[P];
-};
+export type NulleableCoalising<A, B> = NonFalsy<A> extends never ? B : A;
+
+export type TupleOr<A, T> = ValueOf<A> extends never ? A : TupleOr<ArrayFirsElement<T>, Tail<T>>;
 
 export type MakeRequired<T, K extends keyof T = keyof T> = T & { [P in K]-?: NonFalsy<T[P]> };
+export type PickRequired<T, K extends keyof T> = Omit<T, K> & { [P in K]: NonFalsy<T[P]> };
+export type MakePresent<T, K extends keyof T = keyof T> = T & { [P in K]-?: NonNullish<T[P]> };
+export type PickPresent<T, K extends keyof T> = Omit<T, K> & { [P in K]-?: NonNullish<T[P]> };
 
 export type NonFalsy<T> = T extends false | 0 | '' | null | undefined | 0n ? never : T;
+export type NonNullish<T> = T extends null | undefined ? never : T;
 
 export type CamelCase<S extends string> = S extends `${infer P1}_${infer P2}${infer P3}`
 	? `${Lowercase<P1>}${Uppercase<P2>}${CamelCase<P3>}`
@@ -99,20 +116,22 @@ export type SnakeCase<S extends string> = S extends `${infer A}${infer Rest}`
 		: `${A}${SnakeCase<Rest>}`
 	: Lowercase<S>;
 
-export type ObjectToLower<T> = Identify<{
-	[K in keyof T as CamelCase<Exclude<K, symbol | number>>]: T[K] extends unknown[]
-		? Identify<ObjectToLower<T[K][0]>[]>
-		: T[K] extends object
-			? Identify<ObjectToLower<T[K]>>
-			: AuxIsStrictlyUndefined<T[K]> extends true
-				? undefined
-				: ObjectToLowerUndefined<T[K]>;
-}>;
+export type ObjectToLower<T> = T extends unknown[]
+	? ObjectToLower<T[0]>[]
+	: Identify<{
+			[K in keyof T as K extends number ? K : CamelCase<Exclude<K, symbol | number>>]: T[K] extends unknown[]
+				? Identify<ObjectToLower<T[K][0]>[]>
+				: T[K] extends object
+					? Identify<ObjectToLower<T[K]>>
+					: AuxIsStrictlyUndefined<T[K]> extends true
+						? undefined
+						: ObjectToLowerUndefined<T[K]>;
+		}>;
 
 export type ObjectToLowerUndefined<T> = T extends unknown[]
 	? ObjectToLower<T[0]>[]
 	: Identify<{
-			[K in keyof T as CamelCase<Exclude<K, symbol | number>>]: T[K] extends unknown[]
+			[K in keyof T as K extends number ? K : CamelCase<Exclude<K, symbol | number>>]: T[K] extends unknown[]
 				? ObjectToLower<T[K][0]>[]
 				: T[K] extends object
 					? ObjectToLower<T[K]>
@@ -120,7 +139,7 @@ export type ObjectToLowerUndefined<T> = T extends unknown[]
 		}>;
 
 export type ObjectToSnake<T> = Identify<{
-	[K in keyof T as SnakeCase<Exclude<K, symbol | number>>]: T[K] extends unknown[]
+	[K in keyof T as K extends number ? K : SnakeCase<Exclude<K, symbol | number>>]: T[K] extends unknown[]
 		? Identify<ObjectToSnake<T[K][0]>[]>
 		: T[K] extends object
 			? Identify<ObjectToSnake<T[K]>>
@@ -132,7 +151,7 @@ export type ObjectToSnake<T> = Identify<{
 export type ObjectToSnakeUndefined<T> = T extends unknown[]
 	? ObjectToSnake<T[0]>[]
 	: Identify<{
-			[K in keyof T as SnakeCase<Exclude<K, symbol | number>>]: T[K] extends unknown[]
+			[K in keyof T as K extends number ? K : SnakeCase<Exclude<K, symbol | number>>]: T[K] extends unknown[]
 				? ObjectToSnake<T[K][0]>[]
 				: T[K] extends object
 					? ObjectToSnake<T[K]>
@@ -164,14 +183,10 @@ type OptionalizeAux<T extends object> = Identify<
  * it is recursive
  */
 export type Optionalize<T> = T extends object
-	? // biome-ignore lint/style/useShorthandArrayType: typescript things
-		// biome-ignore lint/style/useConsistentArrayType: <explanation>
-		T extends Array<unknown>
+	? T extends Array<unknown>
 		? number extends T['length']
 			? T[number] extends object
-				? // biome-ignore lint/style/useShorthandArrayType: <explanation>
-					// biome-ignore lint/style/useConsistentArrayType: <explanation>
-					Array<OptionalizeAux<T[number]>>
+				? Array<OptionalizeAux<T[number]>>
 				: T
 			: Partial<T>
 		: OptionalizeAux<T>
@@ -201,7 +216,6 @@ export type Clean<T> = DropT<T, never>;
 
 export type PartialAvoid<U, T> = Identify<KeepT<T, U> & Partial<T>>;
 
-// eslint-disable-next-line @typescript-eslint/ban-types
 export type PartialClass<T> = PartialAvoid<Function, T>;
 
 export type AtLeastOne<

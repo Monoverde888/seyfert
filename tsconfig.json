@@ -2,11 +2,7 @@
 	"compilerOptions": {
 		"module": "CommonJS",
 		"target": "ESNext",
-		"lib": [
-			"ESNext",
-			"WebWorker"
-		],
-		"moduleResolution": "node",
+		"moduleResolution": "bundler",
 		"declaration": true,
 		"sourceMap": false,
 		"strict": true,
@@ -23,14 +19,24 @@
 		"noUnusedParameters": true,
 		"noImplicitReturns": true,
 		"noFallthroughCasesInSwitch": true,
-		"skipLibCheck": false,
+		"skipLibCheck": true,
 		"noErrorTruncation": true,
+		"rootDir": "./src",
 		"outDir": "./lib",
 		"stripInternal": true,
+		"strictBindCallApply": true,
+		"strictBuiltinIteratorReturn": true,
+		"strictPropertyInitialization": true,
+		"alwaysStrict": true,
+		"types": [
+			"node"
+		]
 	},
 	"exclude": [
 		"**/lib",
-		"**/__test__"
+		"**/__test__",
+		"**/node_modules",
+		"**/.*/"
 	],
 	"include": [
 		"src"

@@ -1,6 +1,30 @@
 import { promises } from 'node:fs';
 import { basename, join } from 'node:path';
-import { EmbedColors, type ColorResolvable, type Logger, type ObjectToLower, type ObjectToSnake } from '..';
+import type { Cache } from '../../cache';
+import { type APIPartialEmoji, FormattingPatterns, GatewayIntentBits } from '../../types';
+import type { ColorResolvable, EmojiResolvable } from '../types/resolvables';
+import type { ObjectToLower, ObjectToSnake, TypeArray } from '../types/util';
+import { DiscordEpoch, EmbedColors } from './constants';
+import { SeyfertError } from './error';
+import type { Logger } from './logger';
+
+export { type FakePromiseResult, fakePromise } from './fake-promise';
+
+/**
+ * Calculates the shard ID for a guild based on its ID.
+ * @param guildId The ID of the guild.
+ * @param shards The number of shards to calculate the ID for.
+ * @returns The shard ID.
+ */
+export function calculateShardId(guildId: string, shards?: number) {
+	return Number((BigInt(guildId) >> 22n) % BigInt(shards ?? 1));
+}
+
+// It is used for resolve color for better performance
+const ColorLookup: { [key: string]: number } = {
+	Random: -1, // Special value for random color
+	...EmbedColors,
+};
 
 /**
  * Resolves the color to a numeric representation.
@@ -8,21 +32,39 @@ import { EmbedColors, type ColorResolvable, type Logger, type ObjectToLower, typ
  * @returns The numeric representation of the color.
  */
 export function resolveColor(color: ColorResolvable): number {
-	switch (typeof color) {
-		case 'string':
-			if (color === 'Random') return Math.floor(Math.random() * (0xffffff + 1));
-			if (color.startsWith('#')) return Number.parseInt(color.slice(1), 16);
-			if (color in EmbedColors) return EmbedColors[color as keyof typeof EmbedColors];
-			return EmbedColors.Default;
-		case 'number':
-			return color;
-		case 'object':
-			if (Array.isArray(color)) return (color[0] << 16) + (color[1] << 8) + color[2];
-			break;
-		default:
-			return color;
+	const type = typeof color;
+
+	if (type === 'number') {
+		if (!Number.isInteger(color) || (color as number) < 0 || (color as number) > 0xffffff)
+			throw new SeyfertError('INTERNAL_ERROR', { metadata: { detail: `Invalid color: ${color}` } });
+		return color as number;
 	}
-	return color;
+
+	if (type === 'string') {
+		const lookupColor = ColorLookup[color as keyof typeof EmbedColors];
+		if (lookupColor != null) {
+			return lookupColor === -1 ? Math.floor(Math.random() * 0xffffff) : lookupColor;
+		}
+		if ((color as string).startsWith('#')) {
+			const hex = (color as string).slice(1);
+			if (!/^[\da-f]+$/i.test(hex))
+				throw new SeyfertError('INTERNAL_ERROR', { metadata: { detail: `Invalid color: ${color}` } });
+			const value = Number.parseInt(hex, 16);
+			if (value > 0xffffff)
+				throw new SeyfertError('INTERNAL_ERROR', { metadata: { detail: `Invalid color: ${color}` } });
+			return value;
+		}
+		return EmbedColors.Default;
+	}
+
+	if (Array.isArray(color) && color.length >= 3) {
+		const [red, green, blue] = color;
+		if ([red, green, blue].every(value => Number.isInteger(value) && value >= 0 && value <= 255))
+			return (red << 16) | (green << 8) | blue;
+		throw new SeyfertError('INTERNAL_ERROR', { metadata: { detail: `Invalid color: ${color}` } });
+	}
+
+	return EmbedColors.Default;
 }
 
 /**
@@ -40,8 +82,21 @@ export function delay<T>(time: number, result?: T): Promise<T> {
  * @param o The value to check.
  * @returns `true` if the value is an object, otherwise `false`.
  */
-export function isObject(o: any): boolean {
+export function isObject(o: any): o is Record<string, unknown> {
 	return o && typeof o === 'object' && !Array.isArray(o);
+}
+
+export function isPromiseLike<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
+	return (
+		((typeof value === 'object' && value !== null) || typeof value === 'function') &&
+		typeof (value as PromiseLike<T>).then === 'function'
+	);
+}
+
+function isPlainObject(o: unknown): o is Record<string, unknown> {
+	if (!o || typeof o !== 'object') return false;
+	const proto = Object.getPrototypeOf(o);
+	return proto === Object.prototype || proto === null;
 }
 
 /**
@@ -62,7 +117,7 @@ export function MergeOptions<T>(defaults: any, ...options: any[]): T {
 			...Object.fromEntries(
 				Object.entries(defaults).map(([key, value]) => [
 					key,
-					isObject(value) ? MergeOptions(value, option?.[key] || {}) : option?.[key] ?? value,
+					isObject(value) ? MergeOptions(value, option?.[key] || {}) : (option?.[key] ?? value),
 				]),
 			),
 		},
@@ -76,14 +131,17 @@ export function MergeOptions<T>(defaults: any, ...options: any[]): T {
  * @param func The predicate function used to test elements of the array.
  * @returns An object containing two arrays: one with elements that passed the test and one with elements that did not.
  */
-export function filterSplit<Element, Predicate extends (value: Element) => boolean>(arr: Element[], func: Predicate) {
+export function filterSplit<Element, Never = Element>(
+	arr: (Element | Never)[],
+	func: (value: Element | Never) => boolean,
+) {
 	const expect: Element[] = [];
-	const never: Element[] = [];
+	const never: Never[] = [];
 
 	for (const element of arr) {
 		const test = func(element);
-		if (test) expect.push(element);
-		else never.push(element);
+		if (test) expect.push(element as Element);
+		else never.push(element as Never);
 	}
 
 	return { expect, never };
@@ -104,7 +162,7 @@ export class BaseHandler {
 	 * @param path The path to filter.
 	 * @returns `true` if the path passes the filter, otherwise `false`.
 	 */
-	protected filter = (path: string) => !!path;
+	filter = (path: string) => !!path;
 
 	/**
 	 * Recursively retrieves all files in a directory.
@@ -130,7 +188,7 @@ export class BaseHandler {
 	 * @param paths The paths of the files to load.
 	 * @returns A Promise that resolves to an array of loaded files.
 	 */
-	protected async loadFiles<T extends NonNullable<unknown>>(paths: string[]): Promise<T[]> {
+	protected loadFiles<T extends NonNullable<unknown>>(paths: string[]): Promise<T[]> {
 		return Promise.all(paths.map(path => magicImport(path).then(file => file.default ?? file)));
 	}
 
@@ -139,13 +197,13 @@ export class BaseHandler {
 	 * @param paths The paths of the files to load.
 	 * @returns A Promise that resolves to an array of objects containing name, file, and path.
 	 */
-	protected async loadFilesK<T>(paths: string[]): Promise<{ name: string; file: T; path: string }[]> {
+	protected loadFilesK<T>(paths: string[]): Promise<{ name: string; file: T; path: string }[]> {
 		return Promise.all(
 			paths.map(path =>
 				magicImport(path).then(file => {
 					return {
 						name: basename(path),
-						file: file.default ?? file,
+						file,
 						path,
 					};
 				}),
@@ -172,23 +230,22 @@ export function toSnakeCase<Obj extends Record<string, any>>(target: Obj): Objec
 			case 'undefined':
 				result[ReplaceRegex.snake(key)] = value;
 				break;
-			case 'object':
-				if (Array.isArray(value)) {
-					result[ReplaceRegex.snake(key)] = value.map(prop =>
-						typeof prop === 'object' && prop ? toSnakeCase(prop) : prop,
-					);
-					break;
-				}
-				if (isObject(value)) {
-					result[ReplaceRegex.snake(key)] = toSnakeCase(value);
-					break;
-				}
-				if (!Number.isNaN(value)) {
+			case 'object': {
+				if (value === null) {
 					result[ReplaceRegex.snake(key)] = null;
 					break;
 				}
-				result[ReplaceRegex.snake(key)] = toSnakeCase(value);
+				if (Array.isArray(value)) {
+					result[ReplaceRegex.snake(key)] = value.map(prop => (isPlainObject(prop) ? toSnakeCase(prop) : prop));
+					break;
+				}
+				if (isPlainObject(value)) {
+					result[ReplaceRegex.snake(key)] = toSnakeCase(value);
+					break;
+				}
+				result[ReplaceRegex.snake(key)] = value;
 				break;
+			}
 		}
 	}
 	return result as ObjectToSnake<Obj>;
@@ -212,23 +269,22 @@ export function toCamelCase<Obj extends Record<string, any>>(target: Obj): Objec
 			case 'undefined':
 				result[ReplaceRegex.camel(key)] = value;
 				break;
-			case 'object':
-				if (Array.isArray(value)) {
-					result[ReplaceRegex.camel(key)] = value.map(prop =>
-						typeof prop === 'object' && prop ? toCamelCase(prop) : prop,
-					);
-					break;
-				}
-				if (isObject(value)) {
-					result[ReplaceRegex.camel(key)] = toCamelCase(value);
-					break;
-				}
-				if (!Number.isNaN(value)) {
+			case 'object': {
+				if (value === null) {
 					result[ReplaceRegex.camel(key)] = null;
 					break;
 				}
-				result[ReplaceRegex.camel(key)] = toCamelCase(value);
+				if (Array.isArray(value)) {
+					result[ReplaceRegex.camel(key)] = value.map(prop => (isPlainObject(prop) ? toCamelCase(prop) : prop));
+					break;
+				}
+				if (isPlainObject(value)) {
+					result[ReplaceRegex.camel(key)] = toCamelCase(value);
+					break;
+				}
+				result[ReplaceRegex.camel(key)] = value;
 				break;
+			}
 		}
 	}
 	return result as ObjectToLower<Obj>;
@@ -236,7 +292,7 @@ export function toCamelCase<Obj extends Record<string, any>>(target: Obj): Objec
 
 export const ReplaceRegex = {
 	camel: (s: string) => {
-		return s.toLowerCase().replace(/(_\S)/gi, a => a[1].toUpperCase());
+		return s.replace(/_([a-z0-9])/gi, (_, char) => char.toUpperCase());
 	},
 	snake: (s: string) => {
 		return s.replace(/[A-Z]/g, a => `_${a.toLowerCase()}`);
@@ -247,35 +303,125 @@ export async function magicImport(path: string) {
 	try {
 		return require(path);
 	} catch {
-		// biome-ignore lint/security/noGlobalEval: modules import broke
-		return eval('((path) => import(`file:///${path}?update=${Date.now()}`))')(path.split('\\').join('\\\\'));
+		return new Function('path', 'return import(`file:///${path}?update=${Date.now()}`)')(path);
 	}
 }
 
 export type OnFailCallback = (error: unknown) => any;
 
-export function fakePromise<T = unknown | Promise<unknown>>(
-	value: T,
-): {
-	then<R>(callback: (arg: Awaited<T>) => R): R;
-} {
-	if (value instanceof Promise) return value as any;
-	return {
-		// biome-ignore lint/suspicious/noThenProperty: magic
-		then: callback => callback(value as Awaited<T>),
-	};
-}
-
 export function lazyLoadPackage<T>(mod: string): T | undefined {
 	try {
 		return require(mod);
 	} catch (e) {
-		console.log(`Cannot import ${mod}`);
+		console.log(`Cannot import ${mod}`, e);
 		return;
 	}
 }
 
-export function isCloudfareWorker() {
+export function isCloudflareWorker() {
 	//@ts-expect-error
 	return process.platform === 'browser';
+}
+
+/**
+ *
+ * Converts a Discord snowflake to its unix millisecond timestamp.
+ * @param id The snowflake to convert.
+ * @returns The unix millisecond timestamp.
+ */
+export function snowflakeToTimestamp(id: string): number {
+	return Number((BigInt(id) >> 22n) + DiscordEpoch);
+}
+
+export function resolvePartialEmoji(emoji: EmojiResolvable): APIPartialEmoji | undefined {
+	if (typeof emoji === 'string') {
+		const groups: Partial<APIPartialEmoji> | undefined = emoji.match(FormattingPatterns.Emoji)?.groups;
+		if (groups) {
+			return {
+				animated: !!groups.animated,
+				name: groups.name!,
+				id: groups.id!,
+			};
+		}
+		if (emoji.includes('%')) {
+			emoji = encodeURIComponent(emoji);
+		}
+		if (!(emoji.includes(':') || emoji.match(/\d{17,20}/g))) {
+			return { name: emoji, id: null };
+		}
+		return;
+	}
+
+	if (!(emoji.id && emoji.name)) return;
+	return { id: emoji.id, name: emoji.name, animated: !!emoji.animated };
+}
+
+export async function resolveEmoji(emoji: EmojiResolvable, cache: Cache): Promise<APIPartialEmoji | undefined> {
+	const partial = resolvePartialEmoji(emoji);
+	if (partial) return partial;
+
+	if (typeof emoji === 'string') {
+		if (!emoji.match(/\d{17,20}/g)) return;
+		const fromCache = await cache.emojis?.get(emoji);
+		return (
+			fromCache && {
+				animated: fromCache.animated,
+				id: fromCache.id,
+				name: fromCache.name,
+			}
+		);
+	}
+
+	if (emoji.id) {
+		const fromCache = await cache.emojis?.get(emoji.id);
+		if (fromCache)
+			return {
+				animated: fromCache.animated,
+				id: fromCache.id,
+				name: fromCache.name,
+			};
+	}
+	return;
+}
+
+export function encodeEmoji(rawEmoji: APIPartialEmoji) {
+	return rawEmoji.id ? `${rawEmoji.name}:${rawEmoji.id}` : `${rawEmoji.name}`;
+}
+
+export function hasProps<T extends Record<any, any>>(target: T, props: TypeArray<keyof T>): boolean {
+	if (Array.isArray(props)) {
+		return props.every(x => hasProps(target, x));
+	}
+	if (!((props as T[number]) in target)) {
+		return false;
+	}
+	if (typeof target[props] === 'string' && !target[props as T[number]].length) {
+		return false;
+	}
+	return true;
+}
+
+export function hasIntent(intents: number, target: keyof typeof GatewayIntentBits | GatewayIntentBits) {
+	const intent = typeof target === 'string' ? GatewayIntentBits[target] : target;
+	return (intents & intent) === intent;
+}
+
+export function toArrayBuffer(buffer: Buffer | Uint8ClampedArray | Uint8Array): ArrayBuffer {
+	const { buffer: ab, byteOffset, byteLength } = buffer;
+	if (ab instanceof SharedArrayBuffer) {
+		const copy = new ArrayBuffer(byteLength);
+		new Uint8Array(copy).set(new Uint8Array(ab, byteOffset, byteLength));
+		return copy;
+	}
+	return ab.slice(byteOffset, byteOffset + byteLength);
+}
+
+export function toBuffer(arrayBuffer: ArrayBuffer) {
+	return Buffer.from(arrayBuffer);
+}
+
+export function assertString(value: unknown, message?: string): asserts value is string {
+	if (!(typeof value === 'string' && value !== '')) {
+		throw new SeyfertError('INTERNAL_ERROR', { metadata: { detail: message ?? 'Value is not a string' } });
+	}
 }

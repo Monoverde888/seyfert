@@ -1,16 +1,26 @@
-import type { APIGuild, APIPartialGuild, GatewayGuildCreateDispatchData } from 'discord-api-types/v10';
+import type { GuildMemberStructure, GuildStructure, ThreadChannelStructure } from '../client';
 import type { UsingClient } from '../commands';
+import type { CreateInviteFromChannel, GuildSearchMessagesResult } from '../common';
 import type { ObjectToLower, StructPropState, StructStates, ToClass } from '../common/types/util';
+import type {
+	APIGuild,
+	APIPartialGuild,
+	GatewayGuildCreateDispatchData,
+	RESTGetAPIGuildMessagesSearchQuery,
+	RESTPatchAPIGuildJSONBody,
+} from '../types';
 import { AutoModerationRule } from './AutoModerationRule';
-import { GuildEmoji } from './GuildEmoji';
-import { GuildMember } from './GuildMember';
-import { GuildRole } from './GuildRole';
-import { GuildTemplate } from './GuildTemplate';
-import { Sticker } from './Sticker';
 import { BaseChannel, WebhookGuildMethods } from './channels';
+import { GuildEmoji } from './Emoji';
 import { BaseGuild } from './extra/BaseGuild';
 import type { DiscordBase } from './extra/DiscordBase';
 import { GuildBan } from './GuildBan';
+import { GuildCommunityMethods } from './GuildCommunityMethods';
+import { GuildMember } from './GuildMember';
+import { GuildRole } from './GuildRole';
+import { GuildScheduledEvent } from './GuildScheduledEvent';
+import { GuildTemplate } from './GuildTemplate';
+import { Sticker } from './Sticker';
 
 export interface Guild extends ObjectToLower<Omit<APIGuild, 'stickers' | 'emojis' | 'roles'>>, DiscordBase {}
 export class Guild<State extends StructStates = 'api'> extends (BaseGuild as unknown as ToClass<
@@ -26,7 +36,7 @@ export class Guild<State extends StructStates = 'api'> extends (BaseGuild as unk
 		super(client, data);
 
 		if ('joined_at' in data) {
-			this.joinedAt = Number(data.joined_at) as never;
+			this.joinedAt = Date.parse(data.joined_at) as never;
 			this.memberCount = data.member_count as never;
 			this.large = data.large as never;
 			this.unavailable = data.unavailable as never;
@@ -61,12 +71,16 @@ export class Guild<State extends StructStates = 'api'> extends (BaseGuild as unk
 		}
 	}
 
-	fetchOwner(force = false) {
+	async fetchOwner(force = false): Promise<GuildMemberStructure | null> {
 		// For no reason, discord has some guilds without owner... 🤓
 		if (!this.ownerId) {
-			return Promise.resolve(null);
+			return null;
 		}
 		return this.members.fetch(this.ownerId, force);
+	}
+
+	listActiveThreads(force = false): Promise<ThreadChannelStructure[]> {
+		return this.client.threads.listGuildActive(this.id, force);
 	}
 
 	templates = GuildTemplate.methods({ client: this.client, guildId: this.id });
@@ -77,6 +91,22 @@ export class Guild<State extends StructStates = 'api'> extends (BaseGuild as unk
 	channels = BaseChannel.allMethods({ client: this.client, guildId: this.id });
 	emojis = GuildEmoji.methods({ client: this.client, guildId: this.id });
 	bans = GuildBan.methods({ client: this.client, guildId: this.id });
+	events = GuildScheduledEvent.methods({ client: this.client, guildId: this.id });
+	community = GuildCommunityMethods({ client: this.client, guildId: this.id });
+
+	edit(body: RESTPatchAPIGuildJSONBody, reason?: string): Promise<GuildStructure<'api'>> {
+		return this.client.guilds.edit(this.id, body, reason);
+	}
+
+	searchMessages(query?: RESTGetAPIGuildMessagesSearchQuery, wait?: boolean): Promise<GuildSearchMessagesResult> {
+		return this.client.guilds.searchMessages(this.id, query, wait);
+	}
+
+	invites = {
+		list: () => this.client.invites.guilds.list(this.id),
+		create: (data: CreateInviteFromChannel) => this.client.invites.channels.create(data),
+		delete: (code: string, reason?: string) => this.client.invites.delete(code, reason),
+	};
 }
 
 /** Maximun custom guild emojis per level */

@@ -1,121 +1,130 @@
+import { inspect } from 'node:util';
+import type {
+	ComponentContext,
+	EntryPointContext,
+	MenuCommandContext,
+	ModalContext,
+	PermissionStrings,
+	SeyfertBaseChoiceableOption,
+	SeyfertBasicOption,
+	SeyfertChoice,
+} from '../..';
+import type { Attachment } from '../../builders';
+import type { PluginMiddlewareDenialMetadata } from '../../client/plugins/types';
+import type {
+	GuildMemberStructure,
+	GuildRoleStructure,
+	InteractionGuildMemberStructure,
+	OptionResolverStructure,
+	UserStructure,
+} from '../../client/transformers';
+import { type If, magicImport, SeyfertError } from '../../common';
+import type { AutocompleteInteraction, MaybeResolvedChannel, ResolvedChannel } from '../../structures';
 import {
+	type APIApplicationCommandBasicOption,
+	type APIApplicationCommandOption,
+	type APIApplicationCommandSubcommandGroupOption,
 	ApplicationCommandOptionType,
 	ApplicationCommandType,
 	type ApplicationIntegrationType,
 	type InteractionContextType,
-	type APIApplicationCommandBasicOption,
-	type APIApplicationCommandOption,
-	type APIApplicationCommandSubcommandGroupOption,
 	type LocaleString,
-} from 'discord-api-types/v10';
-import type {
-	ComponentContext,
-	MenuCommandContext,
-	ModalContext,
-	PermissionStrings,
-	SeyfertNumberOption,
-	SeyfertStringOption,
-} from '../..';
-import type { Attachment } from '../../builders';
-import { magicImport, type FlatObjectKeys } from '../../common';
-import type { AllChannels, AutocompleteInteraction, GuildRole, InteractionGuildMember, User } from '../../structures';
-import type { Groups, RegisteredMiddlewares } from '../decorators';
-import type { OptionResolver } from '../optionresolver';
+} from '../../types';
+import type { Groups, ResolvedRegisteredMiddlewares } from '../decorators';
+import type { CommandOptionWithType } from '../handle';
 import type { CommandContext } from './chatcontext';
 import type {
-	DefaultLocale,
 	ExtraProps,
 	IgnoreCommand,
-	OKFunction,
+	InferWithPrefix,
 	OnOptionsReturnObject,
-	PassFunction,
+	SeyfertChannelMap,
 	StopFunction,
 	UsingClient,
 } from './shared';
-import { inspect } from 'node:util';
+
+export type CommandOptionChannel<C extends keyof SeyfertChannelMap = keyof SeyfertChannelMap> = If<
+	InferWithPrefix,
+	MaybeResolvedChannel<SeyfertChannelMap[C]>,
+	ResolvedChannel<SeyfertChannelMap[C]>
+>;
 
 export interface ReturnOptionsTypes {
-	1: never; // subcommand
-	2: never; // subcommandgroup
-	3: string;
-	4: number; // integer
-	5: boolean;
-	6: InteractionGuildMember | User;
-	7: AllChannels;
-	8: GuildRole;
-	9: GuildRole | AllChannels | User;
-	10: number; // number
-	11: Attachment;
+	[ApplicationCommandOptionType.Subcommand]: never;
+	[ApplicationCommandOptionType.SubcommandGroup]: never;
+	[ApplicationCommandOptionType.String]: string;
+	[ApplicationCommandOptionType.Integer]: number;
+	[ApplicationCommandOptionType.Boolean]: boolean;
+	[ApplicationCommandOptionType.User]: InteractionGuildMemberStructure | UserStructure;
+	[ApplicationCommandOptionType.Channel]: CommandOptionChannel;
+	[ApplicationCommandOptionType.Role]: GuildRoleStructure;
+	[ApplicationCommandOptionType.Mentionable]:
+		| GuildRoleStructure
+		| InteractionGuildMemberStructure
+		| GuildMemberStructure
+		| UserStructure;
+	[ApplicationCommandOptionType.Number]: number;
+	[ApplicationCommandOptionType.Attachment]: Attachment;
 }
 
-type Wrap<N extends ApplicationCommandOptionType> = N extends
-	| ApplicationCommandOptionType.Subcommand
-	| ApplicationCommandOptionType.SubcommandGroup
-	? never
-	: {
-			required?: boolean;
-			value?(
-				data: { context: CommandContext; value: ReturnOptionsTypes[N] },
-				ok: OKFunction<any>,
-				fail: StopFunction,
-			): void;
-		} & {
-			description: string;
-			description_localizations?: APIApplicationCommandBasicOption['description_localizations'];
-			name_localizations?: APIApplicationCommandBasicOption['name_localizations'];
-			locales?: {
-				name?: FlatObjectKeys<DefaultLocale>;
-				description?: FlatObjectKeys<DefaultLocale>;
-			};
-		};
-
-export type __TypeWrapper<T extends ApplicationCommandOptionType> = Wrap<T>;
-
-export type __TypesWrapper = {
-	[P in keyof typeof ApplicationCommandOptionType]: `${(typeof ApplicationCommandOptionType)[P]}` extends `${infer D extends
-		number}`
-		? Wrap<D>
-		: never;
-};
-
-export type AutocompleteCallback = (interaction: AutocompleteInteraction) => any;
-export type OnAutocompleteErrorCallback = (interaction: AutocompleteInteraction, error: unknown) => any;
-export type CommandBaseOption = __TypesWrapper[keyof __TypesWrapper];
-export type CommandBaseAutocompleteOption = __TypesWrapper[keyof __TypesWrapper] & {
+export type AutocompleteCallback<ValueType extends string | number = string | number> = (
+	interaction: AutocompleteInteraction<boolean, ValueType>,
+) => any;
+export type OnAutocompleteErrorCallback<ValueType extends string | number = string | number> = (
+	interaction: AutocompleteInteraction<boolean, ValueType>,
+	error: unknown,
+) => any;
+export type CommandBaseOption =
+	| SeyfertBaseChoiceableOption<ApplicationCommandOptionType>
+	| SeyfertBasicOption<ApplicationCommandOptionType>;
+export type CommandBaseAutocompleteOption = (
+	| SeyfertBasicOption<ApplicationCommandOptionType>
+	| SeyfertBaseChoiceableOption<ApplicationCommandOptionType>
+) & {
 	autocomplete: AutocompleteCallback;
 	onAutocompleteError?: OnAutocompleteErrorCallback;
 };
 export type CommandAutocompleteOption = CommandBaseAutocompleteOption & { name: string };
-export type __CommandOption = CommandBaseOption; //| CommandBaseAutocompleteOption;
-export type CommandOption = __CommandOption & { name: string };
-export type OptionsRecord = Record<string, __CommandOption & { type: ApplicationCommandOptionType }>;
+export type CommandOptionWithoutName = CommandBaseOption;
+export type CommandOption = CommandOptionWithoutName & { name: string };
+export type OptionsRecord = Record<string, CommandOptionWithoutName & { type: ApplicationCommandOptionType }>;
 
 type KeysWithoutRequired<T extends OptionsRecord> = {
-	[K in keyof T]-?: T[K]['required'] extends true ? never : K;
+	[K in keyof T]-?: NonNullable<T[K]['required']> extends true ? never : K;
 }[keyof T];
 
+type ContextOptionsAuxInternal<
+	T extends CommandBaseOption & {
+		type: ApplicationCommandOptionType;
+	},
+> = T['value'] extends (...args: any) => any
+	? Parameters<Parameters<T['value']>[1]>[0]
+	: NonNullable<T['value']> extends (...args: any) => any
+		? Parameters<Parameters<NonNullable<T['value']>>[1]>[0] extends never
+			? T extends { channel_types?: infer C }
+				? C extends readonly any[]
+					? C[number] extends keyof SeyfertChannelMap
+						? CommandOptionChannel<C[number]>
+						: never
+					: never
+				: T extends { choices?: infer C }
+					? C extends readonly SeyfertChoice<string | number>[]
+						? C[number]['value']
+						: never
+					: never
+			: Parameters<Parameters<NonNullable<T['value']>>[1]>[0]
+		: ReturnOptionsTypes[T['type']];
+
 type ContextOptionsAux<T extends OptionsRecord> = {
-	[K in Exclude<keyof T, KeysWithoutRequired<T>>]: T[K]['value'] extends (...args: any) => any
-		? Parameters<Parameters<T[K]['value']>[1]>[0]
-		: T[K] extends SeyfertStringOption | SeyfertNumberOption
-			? T[K]['choices'] extends NonNullable<SeyfertStringOption['choices'] | SeyfertNumberOption['choices']>
-				? T[K]['choices'][number]['value']
-				: ReturnOptionsTypes[T[K]['type']]
-			: ReturnOptionsTypes[T[K]['type']];
+	[K in Exclude<keyof T, KeysWithoutRequired<T>>]: ContextOptionsAuxInternal<T[K]>;
 } & {
-	[K in KeysWithoutRequired<T>]?: T[K]['value'] extends (...args: any) => any
-		? Parameters<Parameters<T[K]['value']>[1]>[0]
-		: T[K] extends SeyfertStringOption | SeyfertNumberOption
-			? T[K]['choices'] extends NonNullable<SeyfertStringOption['choices'] | SeyfertNumberOption['choices']>
-				? T[K]['choices'][number]['value']
-				: ReturnOptionsTypes[T[K]['type']]
-			: ReturnOptionsTypes[T[K]['type']];
+	[K in KeysWithoutRequired<T>]?: ContextOptionsAuxInternal<T[K]>;
 };
 
 export type ContextOptions<T extends OptionsRecord> = ContextOptionsAux<T>;
 
 export class BaseCommand {
-	middlewares: (keyof RegisteredMiddlewares)[] = [];
+	middlewares: readonly (keyof ResolvedRegisteredMiddlewares)[] = [];
 
 	__filePath?: string;
 	__t?: { name: string | undefined; description: string | undefined };
@@ -133,7 +142,7 @@ export class BaseCommand {
 	name_localizations?: Partial<Record<LocaleString, string>>;
 	description_localizations?: Partial<Record<LocaleString, string>>;
 
-	options?: CommandOption[] | SubCommand[];
+	options?: CommandOptionWithType[] | SubCommand[];
 
 	ignore?: IgnoreCommand;
 
@@ -144,7 +153,7 @@ export class BaseCommand {
 	/** @internal */
 	async __runOptions(
 		ctx: CommandContext<{}, never>,
-		resolver: OptionResolver,
+		resolver: OptionResolverStructure,
 	): Promise<[boolean, OnOptionsReturnObject]> {
 		if (!this?.options?.length) {
 			return [false, {}];
@@ -153,20 +162,17 @@ export class BaseCommand {
 		let errored = false;
 		for (const i of this.options ?? []) {
 			try {
-				const option = this.options!.find(x => x.name === i.name) as __CommandOption;
+				const option = this.options!.find(x => x.name === i.name) as CommandOptionWithoutName;
 				const value =
 					resolver.getHoisted(i.name)?.value !== undefined
-						? await new Promise(
-								// biome-ignore lint/suspicious/noAsyncPromiseExecutor: yes
-								async (res, rej) => {
-									try {
-										(await option.value?.({ context: ctx, value: resolver.getValue(i.name) } as never, res, rej)) ||
-											res(resolver.getValue(i.name));
-									} catch (e) {
-										rej(e);
-									}
-								},
-							)
+						? await new Promise(async (res, rej) => {
+								try {
+									(await option.value?.({ context: ctx, value: resolver.getValue(i.name) } as never, res, rej)) ||
+										res(resolver.getValue(i.name));
+								} catch (e) {
+									rej(e);
+								}
+							})
 						: undefined;
 				if (value === undefined) {
 					if (option.required) {
@@ -189,7 +195,7 @@ export class BaseCommand {
 				errored = true;
 				data[i.name] = {
 					failed: true,
-					value: e instanceof Error ? e.message : typeof e === 'string' ? e : inspect(e),
+					value: e instanceof SeyfertError || e instanceof Error ? e.message : typeof e === 'string' ? e : inspect(e),
 					parseError: undefined,
 				};
 			}
@@ -199,61 +205,96 @@ export class BaseCommand {
 
 	/** @internal */
 	static __runMiddlewares(
-		context: CommandContext<{}, never> | ComponentContext | MenuCommandContext<any> | ModalContext,
-		middlewares: (keyof RegisteredMiddlewares)[],
+		context: CommandContext<{}, never> | ComponentContext | MenuCommandContext<any> | ModalContext | EntryPointContext,
+		middlewares: readonly (keyof ResolvedRegisteredMiddlewares)[],
 		global: boolean,
-	): Promise<{ error?: string; pass?: boolean }> {
+	): Promise<{ error?: string; metadata?: PluginMiddlewareDenialMetadata; pass?: boolean }> {
 		if (!middlewares.length) {
 			return Promise.resolve({});
 		}
+		const missingMiddlewares = middlewares.filter(middleware => !context.client.middlewares?.[middleware]);
+		if (missingMiddlewares.length) {
+			const owner = BaseCommand.__getMiddlewareOwnerName(context);
+			const message = `${owner} has ${
+				global ? 'global ' : ''
+			}middleware${missingMiddlewares.length === 1 ? '' : 's'} ${missingMiddlewares
+				.map(middleware => `"${String(middleware)}"`)
+				.join(', ')} assigned, but ${missingMiddlewares.length === 1 ? 'it is' : 'they are'} not registered.`;
+			context.client.logger.warn(message);
+		}
+		const activeMiddlewares = middlewares.filter(middleware => context.client.middlewares?.[middleware]);
+		if (!activeMiddlewares.length) return Promise.resolve({});
 		let index = 0;
 
-		return new Promise(res => {
+		return new Promise((res, rej) => {
 			let running = true;
-			const pass: PassFunction = () => {
+			function next(...args: unknown[]) {
 				if (!running) {
 					return;
 				}
-				running = false;
-				return res({ pass: true });
-			};
-			function next(obj: any) {
-				if (!running) {
-					return;
+				if (args.length) {
+					context[global ? 'globalMetadata' : 'metadata'][activeMiddlewares[index]] = args[0] as never;
 				}
-				// biome-ignore lint/style/noArguments: yes
-				// biome-ignore lint/correctness/noUndeclaredVariables: xd
-				if (arguments.length) {
-					// @ts-expect-error
-					context[global ? 'globalMetadata' : 'metadata'][middlewares[index]] = obj;
-				}
-				if (++index >= middlewares.length) {
+				if (++index >= activeMiddlewares.length) {
 					running = false;
 					return res({});
 				}
-				context.client.middlewares![middlewares[index]]({ context, next, stop, pass });
+				void invoke(activeMiddlewares[index]);
 			}
-			const stop: StopFunction = err => {
+			const deny = (err: string, middleware: keyof ResolvedRegisteredMiddlewares) => {
 				if (!running) {
 					return;
 				}
 				running = false;
-				return res({ error: err });
+				return res({
+					error: err,
+					metadata: { middleware: String(middleware), scope: global ? 'global' : 'command' },
+				});
 			};
-			context.client.middlewares![middlewares[0]]({ context, next, stop, pass });
+			const stop: StopFunction = err => {
+				if (err == null) {
+					if (!running) {
+						return;
+					}
+					running = false;
+					return res({ pass: true });
+				}
+				return deny(err, activeMiddlewares[index]);
+			};
+			async function invoke(middleware: keyof ResolvedRegisteredMiddlewares) {
+				try {
+					await context.client.middlewares![middleware]({ context, next, stop });
+				} catch (err) {
+					if (!running) {
+						return;
+					}
+					running = false;
+					rej(err);
+				}
+			}
+			void invoke(activeMiddlewares[0]);
 		});
+	}
+
+	private static __getMiddlewareOwnerName(
+		context: CommandContext<{}, never> | ComponentContext | MenuCommandContext<any> | ModalContext | EntryPointContext,
+	) {
+		const command = context.command as { customId?: string | RegExp; name?: string } | undefined;
+		if (command?.name) return `Command "${command.name}"`;
+		if (typeof command?.customId === 'string') return `Component "${command.customId}"`;
+		return 'Command';
 	}
 
 	/** @internal */
 	__runMiddlewares(context: CommandContext<{}, never>) {
-		return BaseCommand.__runMiddlewares(context, this.middlewares as (keyof RegisteredMiddlewares)[], false);
+		return BaseCommand.__runMiddlewares(context, this.middlewares, false);
 	}
 
 	/** @internal */
 	__runGlobalMiddlewares(context: CommandContext<{}, never>) {
 		return BaseCommand.__runMiddlewares(
 			context,
-			(context.client.options?.globalMiddlewares ?? []) as (keyof RegisteredMiddlewares)[],
+			(context.client.options?.globalMiddlewares ?? []) as readonly (keyof ResolvedRegisteredMiddlewares)[],
 			true,
 		);
 	}
@@ -299,11 +340,13 @@ export class BaseCommand {
 		Object.setPrototypeOf(this, __tempCommand.prototype);
 	}
 
+	onBeforeMiddlewares?(context: CommandContext): any;
+	onBeforeOptions?(context: CommandContext): any;
 	run?(context: CommandContext): any;
 	onAfterRun?(context: CommandContext, error: unknown | undefined): any;
 	onRunError?(context: CommandContext, error: unknown): any;
 	onOptionsError?(context: CommandContext, metadata: OnOptionsReturnObject): any;
-	onMiddlewaresError?(context: CommandContext, error: string): any;
+	onMiddlewaresError?(context: CommandContext, error: string, metadata: PluginMiddlewareDenialMetadata): any;
 	onBotPermissionsFail?(context: CommandContext, permissions: PermissionStrings): any;
 	onPermissionsFail?(context: CommandContext, permissions: PermissionStrings): any;
 	onInternalError?(client: UsingClient, command: Command | SubCommand, error?: unknown): any;
@@ -359,7 +402,7 @@ export class Command extends BaseCommand {
 export abstract class SubCommand extends BaseCommand {
 	type = ApplicationCommandOptionType.Subcommand;
 	group?: string;
-	declare options?: CommandOption[];
+	declare options?: CommandOptionWithType[];
 
 	toJSON() {
 		return {
@@ -369,5 +412,5 @@ export abstract class SubCommand extends BaseCommand {
 		};
 	}
 
-	abstract run(context: CommandContext<any>): any;
+	abstract run(context: CommandContext): any;
 }

@@ -1,0 +1,121 @@
+import type { Snowflake } from '..';
+import type { APIInvite } from '../payloads';
+
+/**
+ * https://docs.discord.com/developers/resources/invite#get-invite
+ */
+export interface RESTGetAPIInviteQuery {
+	/**
+	 * Whether the invite should contain approximate member counts
+	 */
+	with_counts?: boolean;
+	/**
+	 * Whether the invite should contain the expiration date
+	 */
+	with_expiration?: boolean;
+	/**
+	 * The guild scheduled event to include with the invite
+	 */
+	guild_scheduled_event_id?: Snowflake;
+}
+
+export type RESTGetAPIInviteResult = APIInvite;
+
+/**
+ * https://docs.discord.com/developers/resources/invite#delete-invite
+ */
+export type RESTDeleteAPIInviteResult = APIInvite;
+
+/**
+ * https://docs.discord.com/developers/resources/invite#get-target-users
+ */
+export type RESTGetTargetUsersResult = string;
+
+/**
+ * https://docs.discord.com/developers/resources/invite#get-target-users
+ *
+ * Updates the users allowed to see and accept this invite.
+ * Uploading a file with invalid user IDs will result in a 400 with the invalid IDs described.
+ */
+export interface RESTPutUpdateTargetUsers {
+	/**
+	 * A csv file with a single column of user IDs for all the users able to accept this invite
+	 */
+	target_users_file: Blob;
+}
+
+export type RESTPutUpdateTargetUsersResult = undefined;
+
+export enum TargetUsersJobStatusCode {
+	/** The default value. */
+	UNSPECIFIED = 0,
+	/**	The job is still being processed. */
+	PROCESSING,
+	/** The job has been completed successfully. */
+	COMPLETED,
+	/** The job has failed, see `error_message` field for more details. */
+	FAILED,
+}
+
+/**
+ * https://docs.discord.com/developers/resources/invite#get-target-users-job-status
+ * Processing target users from a CSV when creating or updating an invite is done asynchronously.
+ * This endpoint allows you to check the status of that job.
+ */
+export interface RESTGetTargetUsersJobStatus {
+	status: TargetUsersJobStatusCode;
+	total_users: number;
+	processed_users: number;
+	created_at: string;
+	completed_at: string | null;
+	/** The error message if the job has failed. */
+	error_message?: string;
+}
+
+export type RESTGetTargetUsersJobStatusResult = RESTGetTargetUsersJobStatus;
+
+/**
+ * https://docs.discord.com/developers/resources/invite#add-target-user
+ *
+ * Adds a target user to an existing invite.
+ * Requires the caller to be the inviter or have the MANAGE_GUILD permission.
+ */
+export type RESTPutAddTargetUserResult = undefined;
+
+/**
+ * https://docs.discord.com/developers/resources/invite#remove-target-user
+ *
+ * Removes a target user from an existing invite.
+ * Requires the caller to be the inviter or have the MANAGE_GUILD permission.
+ */
+export type RESTDeleteRemoveTargetUserResult = undefined;
+
+/**
+ * https://docs.discord.com/developers/resources/invite#bulk-add-target-users
+ *
+ * Adds multiple target users to an existing invite.
+ * Requires the caller to be the inviter or have the MANAGE_GUILD permission.
+ */
+export interface RESTPostBulkAddTargetUsersJSONBody {
+	/**
+	 * The IDs of users to add (max 1000)
+	 */
+	user_ids: readonly Snowflake[];
+}
+
+export type RESTPostBulkAddTargetUsersResult = undefined;
+
+/**
+ * https://docs.discord.com/developers/resources/invite#bulk-delete-target-users
+ *
+ * Removes multiple target users from an existing invite.
+ * Requires the caller to be the inviter or have the MANAGE_GUILD permission.
+ */
+export interface RESTPostBulkDeleteTargetUsersJSONBody {
+	/**
+	 * The IDs of users to remove (max 1000)
+	 */
+	user_ids: readonly Snowflake[];
+}
+
+export type RESTPostBulkDeleteTargetUsersResult = undefined;

@@ -1,4 +1,4 @@
-import type { ComponentType } from 'discord-api-types/v10';
+import type { ComponentType } from '../types';
 import { BaseComponent } from './BaseComponent';
 
 export class TextInputComponent extends BaseComponent<ComponentType.TextInput> {
@@ -12,10 +12,6 @@ export class TextInputComponent extends BaseComponent<ComponentType.TextInput> {
 
 	get style() {
 		return this.data.style;
-	}
-
-	get label() {
-		return this.data.label;
 	}
 
 	get max() {

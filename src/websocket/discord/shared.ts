@@ -1,11 +1,24 @@
+import type { InternalRuntimeConfig, InternalRuntimeConfigHTTP } from '../../client/base';
+import type { Awaitable, DeepPartial, Logger } from '../../common';
 import type {
 	APIGatewayBotInfo,
 	GatewayDispatchPayload,
 	GatewayIntentBits,
 	GatewayPresenceUpdateData,
-} from 'discord-api-types/v10';
-import type { Logger } from '../../common';
+	GatewaySendPayload,
+} from '../../types';
 import type { IdentifyProperties } from '../constants';
+import type { WorkerMessages } from './worker';
+
+export interface ShardDisconnectData {
+	shardId: number;
+	code: number;
+	reason: string;
+}
+
+export interface ShardReconnectData {
+	shardId: number;
+}
 
 export interface ShardManagerOptions extends ShardDetails {
 	/** Important data which is used by the manager to connect shards to the gateway. */
@@ -26,6 +39,12 @@ export interface ShardManagerOptions extends ShardDetails {
 	 * The payload handlers for messages on the shard.
 	 */
 	handlePayload(shardId: number, packet: GatewayDispatchPayload): unknown;
+	handleSendPayload?(
+		shardId: number,
+		payload: GatewaySendPayload,
+	): Awaitable<GatewaySendPayload | null | undefined | void>;
+	onShardDisconnect?(data: ShardDisconnectData): Awaitable<unknown>;
+	onShardReconnect?(data: ShardReconnectData): Awaitable<unknown>;
 	/**
 	 * wheter to send debug information to the console
 	 */
@@ -33,35 +52,80 @@ export interface ShardManagerOptions extends ShardDetails {
 	/**
 	 * Set a presence.
 	 */
-	presence?: (shardId: number, workerId: number) => GatewayPresenceUpdateData;
+	presence?: (shardId: number) => GatewayPresenceUpdateData;
 
 	compress?: boolean;
+	resharding?: {
+		/**
+		 * @returns the gateway connection info
+		 */
+		getInfo(): Promise<APIGatewayBotInfo>;
+		interval: number;
+		percentage: number;
+	};
+	reconnectTimeout?: number;
+	connectionTimeout?: number;
 }
 
-export interface WorkerManagerOptions extends Omit<ShardManagerOptions, 'handlePayload'> {
-	mode: 'threads' | 'clusters';
+export interface CustomManagerAdapter {
+	postMessage(workerId: number, body: unknown): Awaitable<unknown>;
+	spawn(workerData: WorkerData, env: Record<string, any>): Awaitable<unknown>;
+}
 
+interface WorkerManagerOptionsBase extends Omit<ShardManagerOptions, 'handlePayload' | 'presence' | 'properties'> {
 	workers?: number;
 
 	/**
-	 * @default 32
+	 * Environment variables to add to each worker.
+	 * Variables managed by Seyfert take precedence over matching keys.
+	 */
+	workerEnv?: Readonly<Record<string, string>>;
+
+	/**
+	 * @default 16
 	 */
 	shardsPerWorker?: number;
 
 	workerProxy?: boolean;
 
-	path: string;
+	/** @default 15000 */
+	heartbeaterInterval?: number;
 
-	handlePayload(shardId: number, workerId: number, packet: GatewayDispatchPayload): unknown;
+	handlePayload?(shardId: number, workerId: number, packet: GatewayDispatchPayload): any;
+
+	presence?: (shardId: number, workerId: number) => GatewayPresenceUpdateData;
+
+	handleWorkerMessage?(message: WorkerMessages): any;
+
+	properties?: DeepPartial<NonNullable<ShardManagerOptions['properties']>>;
+
+	getRC?(): Awaitable<InternalRuntimeConfig | InternalRuntimeConfigHTTP>;
 }
+
+export type WorkerManagerOptions =
+	| (WorkerManagerOptionsBase & {
+			mode?: 'threads';
+			path: string;
+			adapter?: CustomManagerAdapter;
+	  })
+	| (WorkerManagerOptionsBase & {
+			mode: 'clusters';
+			path: string;
+			adapter?: CustomManagerAdapter;
+	  })
+	| (WorkerManagerOptionsBase & {
+			mode: 'custom';
+			adapter: CustomManagerAdapter;
+			path?: string;
+	  });
 
 export interface ShardData {
 	/** resume seq to resume connections */
-	resumeSeq: number | null;
+	resume_seq: number | null;
 
 	/**
 	 * resume_gateway_url is the url to resume the connection
-	 * @link https://discord.com/developers/docs/topics/gateway#ready-event
+	 * @link https://docs.discord.com/developers/topics/gateway#ready-event
 	 */
 	resume_gateway_url?: string;
 
@@ -98,6 +162,8 @@ export interface ShardDetails {
 export interface ShardOptions extends ShardDetails {
 	info: APIGatewayBotInfo;
 	handlePayload(shardId: number, packet: GatewayDispatchPayload): unknown;
+	onShardDisconnect?(data: ShardDisconnectData): Awaitable<unknown>;
+	onShardReconnect?(data: ShardReconnectData): Awaitable<unknown>;
 	ratelimitOptions?: {
 		maxRequestsPerRateLimitTick: number;
 		rateLimitResetInterval: number;
@@ -105,11 +171,17 @@ export interface ShardOptions extends ShardDetails {
 	debugger?: Logger;
 	compress: boolean;
 	presence?: GatewayPresenceUpdateData;
+	reconnectTimeout?: number;
+	connectionTimeout?: number;
 }
 
 export enum ShardSocketCloseCodes {
 	Shutdown = 3000,
 	ZombiedConnection = 3010,
+	Reconnect = 3020,
+	Resharding = 3030,
+	ShutdownAll = 3040,
+	Timeout = 3050,
 }
 
 export interface WorkerData {
@@ -117,8 +189,14 @@ export interface WorkerData {
 	token: string;
 	path: string;
 	shards: number[];
+	totalShards: number;
+	totalWorkers: number;
+	mode: 'custom' | 'clusters' | 'threads';
 	workerId: number;
 	debug: boolean;
 	workerProxy: boolean;
+	info: APIGatewayBotInfo;
+	compress: boolean;
 	__USING_WATCHER__?: boolean;
+	resharding: boolean;
 }

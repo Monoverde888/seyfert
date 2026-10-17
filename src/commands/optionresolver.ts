@@ -1,3 +1,13 @@
+import { Attachment } from '../builders';
+import {
+	type GuildMemberStructure,
+	type GuildRoleStructure,
+	type InteractionGuildMemberStructure,
+	Transformers,
+	type UserStructure,
+} from '../client/transformers';
+import { type MakePresent, SeyfertError } from '../common';
+import { channelFrom } from '../structures';
 import {
 	type APIApplicationCommandInteractionDataOption,
 	type APIAttachment,
@@ -7,28 +17,29 @@ import {
 	type APIRole,
 	type APIUser,
 	ApplicationCommandOptionType,
-} from 'discord-api-types/v10';
-import { Attachment, GuildMember } from '..';
-import type { MakeRequired } from '../common';
-import type { AllChannels } from '../structures';
-import { GuildRole, InteractionGuildMember, User } from '../structures';
-import channelFrom from '../structures/channels';
-import type { Command, CommandAutocompleteOption, CommandOption, SubCommand } from './applications/chat';
+} from '../types';
+import type {
+	Command,
+	CommandAutocompleteOption,
+	CommandOption,
+	CommandOptionChannel,
+	SubCommand,
+} from './applications/chat';
 import type { UsingClient } from './applications/shared';
 
 export type ContextOptionsResolved = {
-	members?: Record<string, APIGuildMember | APIInteractionGuildMember | GuildMember | InteractionGuildMember>;
-	users?: Record<string, APIUser | User>;
-	roles?: Record<string, APIRole | GuildRole>;
-	channels?: Record<string, APIInteractionDataResolvedChannel | AllChannels>;
-	attachments?: Record<string, APIAttachment | Attachment>;
+	members?: Record<string, APIGuildMember | Omit<APIGuildMember, 'user'> | APIInteractionGuildMember>;
+	users?: Record<string, APIUser>;
+	roles?: Record<string, APIRole>;
+	channels?: Record<string, APIInteractionDataResolvedChannel>;
+	attachments?: Record<string, APIAttachment>;
 };
 
 export class OptionResolver {
 	readonly options: OptionResolved[];
 	public hoistedOptions: OptionResolved[];
 	private subCommand: string | null = null;
-	private group: string | null = null;
+	private group?: string;
 	constructor(
 		private client: UsingClient,
 		options: APIApplicationCommandInteractionDataOption[],
@@ -58,7 +69,7 @@ export class OptionResolver {
 	getCommand() {
 		if (this.subCommand) {
 			return (this.parent?.options as SubCommand[] | undefined)?.find(
-				x => (this.group ? x.group === this.group : true) && x.name === this.subCommand,
+				x => this.group === x.group && x.name === this.subCommand,
 			);
 		}
 		return this.parent;
@@ -69,7 +80,7 @@ export class OptionResolver {
 	}
 
 	getAutocomplete() {
-		return (this.getCommand()?.options as CommandOption[]).find(
+		return (this.getCommand()?.options as CommandOption[] | undefined)?.find(
 			option => option.name === this.hoistedOptions.find(x => x.focused)?.name,
 		) as CommandAutocompleteOption | undefined;
 	}
@@ -94,7 +105,19 @@ export class OptionResolver {
 		return this.hoistedOptions.find(x => x.name === name);
 	}
 
-	getValue(name: string) {
+	getValue(
+		name: string,
+	):
+		| CommandOptionChannel
+		| Attachment
+		| boolean
+		| number
+		| string
+		| UserStructure
+		| GuildMemberStructure
+		| InteractionGuildMemberStructure
+		| GuildRoleStructure
+		| undefined {
 		const option = this.getHoisted(name);
 		if (!option) {
 			return;
@@ -126,16 +149,16 @@ export class OptionResolver {
 	private getTypedOption(name: string, allow: ApplicationCommandOptionType[]) {
 		const option = this.getHoisted(name);
 		if (!option) {
-			throw new Error('Bad Option');
+			throw new SeyfertError('BAD_OPTION', { metadata: { detail: 'Bad Option' } });
 		}
 		if (!allow.includes(option.type)) {
-			throw new Error('Bad Option');
+			throw new SeyfertError('BAD_OPTION', { metadata: { detail: 'Bad Option' } });
 		}
 		return option;
 	}
 
-	getChannel(name: string, required?: true): AllChannels;
-	getChannel(name: string): AllChannels | undefined {
+	getChannel(name: string, required?: true): CommandOptionChannel;
+	getChannel(name: string): CommandOptionChannel | undefined {
 		const option = this.getTypedOption(name, [ApplicationCommandOptionType.Channel]);
 		return option.channel;
 	}
@@ -161,28 +184,26 @@ export class OptionResolver {
 			const value = resolve.value as string;
 			const user = resolved.users?.[value];
 			if (user) {
-				resolve.user = user instanceof User ? user : new User(this.client, user);
+				resolve.user = Transformers.User(this.client, user);
 			}
 
 			const member = resolved.members?.[value];
 
 			if (member) {
 				resolve.member =
-					member instanceof GuildMember || member instanceof InteractionGuildMember
-						? member
-						: 'permissions' in member
-							? new InteractionGuildMember(this.client, member, user!, this.guildId!)
-							: new GuildMember(this.client, member, user!, this.guildId!);
+					'permissions' in member
+						? Transformers.InteractionGuildMember(this.client, member, user!, this.guildId!)
+						: Transformers.GuildMember(this.client, member, user!, this.guildId!);
 			}
 
 			const channel = resolved.channels?.[value];
 			if (channel) {
-				resolve.channel = 'fetch' in channel ? (channel as unknown as AllChannels) : channelFrom(channel, this.client);
+				resolve.channel = channelFrom(channel, this.client);
 			}
 
 			const role = resolved.roles?.[value];
 			if (role) {
-				resolve.role = role instanceof GuildRole ? role : new GuildRole(this.client, role, this.guildId!);
+				resolve.role = Transformers.GuildRole(this.client, role, this.guildId!);
 			}
 
 			const attachment = resolved.attachments?.[value];
@@ -200,15 +221,15 @@ export interface OptionResolved {
 	type: ApplicationCommandOptionType;
 	value?: string | number | boolean;
 	options?: OptionResolved[];
-	user?: User;
-	member?: GuildMember | InteractionGuildMember;
+	user?: UserStructure;
+	member?: GuildMemberStructure | InteractionGuildMemberStructure;
 	attachment?: Attachment;
-	channel?: AllChannels;
-	role?: GuildRole;
+	channel?: CommandOptionChannel;
+	role?: GuildRoleStructure;
 	focused?: boolean;
 }
 
-export type OptionResolvedWithValue = MakeRequired<Pick<OptionResolved, 'name' | 'value' | 'focused'>, 'value'> & {
+export type OptionResolvedWithValue = MakePresent<Pick<OptionResolved, 'name' | 'value' | 'focused'>, 'value'> & {
 	type:
 		| ApplicationCommandOptionType.Boolean
 		| ApplicationCommandOptionType.Integer

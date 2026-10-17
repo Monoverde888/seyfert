@@ -1,0 +1,68 @@
+import { apiAttachment } from '@slipher/testing';
+import { afterEach, describe, expect, test, vi } from 'vitest';
+import { Attachment, AttachmentBuilder, resolveAttachment, resolveImage } from '../src/builders/Attachment';
+import { AttachmentFlags } from '../src/types';
+
+describe('attachment spoilers', () => {
+	test('recognizes and can remove the legacy spoiler filename prefix', () => {
+		const attachment = new AttachmentBuilder().setName('SPOILER_image.png');
+
+		expect(attachment.spoiler).toBe(true);
+
+		attachment.setSpoiler(false);
+
+		expect(attachment.data.filename).toBe('image.png');
+		expect(resolveAttachment(attachment)).toMatchObject({ filename: 'image.png', is_spoiler: false });
+	});
+
+	test('reads spoiler state from attachment flags with a legacy filename fallback', () => {
+		const flagged = new Attachment({} as never, {
+			id: '1',
+			filename: 'image.png',
+			size: 3,
+			url: 'https://cdn.example/image.png',
+			proxy_url: 'https://cdn.example/image.png',
+			flags: AttachmentFlags.IsSpoiler,
+		});
+		const legacy = new Attachment({} as never, {
+			id: '2',
+			filename: 'SPOILER_image.png',
+			size: 3,
+			url: 'https://cdn.example/legacy.png',
+			proxy_url: 'https://cdn.example/legacy.png',
+		});
+
+		expect(flagged.spoiler).toBe(true);
+		expect(legacy.spoiler).toBe(true);
+	});
+});
+
+describe('resolveImage', () => {
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	test('converts fetched Attachment data to a data URL', async () => {
+		vi.stubGlobal(
+			'fetch',
+			vi.fn(async () => {
+				return new Response(new Uint8Array([97, 98, 99]), {
+					status: 200,
+					headers: { 'content-type': 'image/png' },
+				});
+			}),
+		);
+		const attachment = new Attachment(
+			{} as never,
+			apiAttachment({
+				id: '1',
+				filename: 'image.png',
+				size: 3,
+				url: 'https://cdn.example/image.png',
+				contentType: 'image/png',
+			}),
+		);
+
+		await expect(resolveImage(attachment)).resolves.toBe('data:image/png;base64,YWJj');
+	});
+});

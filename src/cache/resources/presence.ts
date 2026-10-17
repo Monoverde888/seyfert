@@ -1,11 +1,12 @@
-import type { GatewayPresenceUpdate } from 'discord-api-types/v10';
-import { GuildRelatedResource } from './default/guild-related';
+import type { CacheFrom } from '../..';
+import type { GatewayPresenceUpdate } from '../../types';
+import { GuildBasedResource } from './default/guild-based';
 
-export class Presences extends GuildRelatedResource<PresenceResource> {
+export class Presences extends GuildBasedResource<PresenceResource, GatewayPresenceUpdate> {
 	namespace = 'presence';
 
 	//@ts-expect-error
-	filter(data: GatewayPresenceUpdate, id: string, guild_id?: string) {
+	filter(data: GatewayPresenceUpdate, id: string, guild_id: string, from: CacheFrom) {
 		return true;
 	}
 
@@ -17,4 +18,4 @@ export class Presences extends GuildRelatedResource<PresenceResource> {
 	}
 }
 
-export type PresenceResource = Omit<GatewayPresenceUpdate, 'user'> & { id: string };
+export type PresenceResource = Omit<GatewayPresenceUpdate, 'user'> & { id: string; user_id: string };

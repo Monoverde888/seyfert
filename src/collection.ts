@@ -64,11 +64,25 @@ export class Collection<K, V> extends Map<K, V> {
 	 * const filteredArray = collection.filter((value, key) => key % 2 === 0);
 	 * console.log(filteredArray); // Output: ['two']
 	 */
+	filter<S extends V>(fn: (value: V, key: K, collection: this) => value is S): S[];
+	filter(fn: (value: V, key: K, collection: this) => boolean): V[];
 	filter(fn: (value: V, key: K, collection: this) => boolean): V[] {
 		const result: V[] = [];
 
 		for (const [key, value] of this.entries()) {
 			if (fn(value, key, this)) result.push(value);
+		}
+
+		return result;
+	}
+
+	filterCollection<S extends V>(fn: (value: V, key: K, collection: this) => value is S): Collection<K, S>;
+	filterCollection(fn: (value: V, key: K, collection: this) => boolean): Collection<K, V>;
+	filterCollection(fn: (value: V, key: K, collection: this) => boolean): Collection<K, V> {
+		const result = new Collection<K, V>();
+
+		for (const [key, value] of this.entries()) {
+			if (fn(value, key, this)) result.set(key, value);
 		}
 
 		return result;
@@ -89,20 +103,18 @@ export class Collection<K, V> extends Map<K, V> {
 	 */
 	reduce<T = any>(fn: (accumulator: T, value: V, key: K, collection: this) => T, initialValue?: T): T {
 		const entries = this.entries();
-		const first = entries.next().value as [K, V];
-		let result = initialValue;
-
-		if (result !== undefined) {
-			result = fn(result, first[1], first[0], this);
+		let result: T;
+		if (initialValue !== undefined) {
+			result = initialValue;
 		} else {
-			result = first[1] as unknown as T;
+			const first = entries.next();
+			if (first.done) throw new TypeError('Reduce of empty collection with no initial value');
+			result = first.value[1] as unknown as T;
 		}
-
 		for (const [key, value] of entries) {
 			result = fn(result, value, key, this);
 		}
-
-		return result as T;
+		return result;
 	}
 
 	/**
@@ -161,6 +173,8 @@ export class Collection<K, V> extends Map<K, V> {
 	 * const firstEvenValue = collection.find(value => value % 2 === 0);
 	 * console.log(firstEvenValue); // Output: 2
 	 */
+	find<S extends V>(fn: (value: V, key: K, collection: this) => value is S): S | undefined;
+	find(fn: (value: V, key: K, collection: this) => boolean): V | undefined;
 	find(fn: (value: V, key: K, collection: this) => boolean): V | undefined {
 		for (const [key, value] of this.entries()) {
 			if (fn(value, key, this)) {
@@ -192,7 +206,120 @@ export class Collection<K, V> extends Map<K, V> {
 	}
 }
 
-type LimitedCollectionData<V> = { expire: number; expireOn: number; value: V };
+export type LimitedCollectionData<V> = { expire: number; expireOn: number; value: V };
+type LimitedCollectionExpiration = { expire: number; expireOn: number };
+type LimitedCollectionCloser<K> = LimitedCollectionExpiration & { key: K };
+type LimitedCollectionExpirationNode<K> = LimitedCollectionCloser<K> & { index: number };
+type LimitedCollectionExpirationSchedule =
+	| { type: 'immediate'; handle: NodeJS.Immediate }
+	| { type: 'timeout'; handle: NodeJS.Timeout };
+
+const expirationBatchSize = 1_024;
+const maxTimerDelay = 2_147_483_647;
+
+class LimitedCollectionExpirationQueue<K> {
+	private readonly byKey = new Map<K, LimitedCollectionExpirationNode<K>>();
+	private readonly heap: LimitedCollectionExpirationNode<K>[] = [];
+
+	get size() {
+		return this.byKey.size;
+	}
+
+	get first(): LimitedCollectionCloser<K> | undefined {
+		return this.heap[0];
+	}
+
+	get(key: K): LimitedCollectionExpiration | undefined {
+		return this.byKey.get(key);
+	}
+
+	set(key: K, expire: number, expireOn: number) {
+		const expiration = this.byKey.get(key);
+		if (expiration) {
+			const previousExpireOn = expiration.expireOn;
+			expiration.expire = expire;
+			expiration.expireOn = expireOn;
+			this._rebalance(expiration, previousExpireOn);
+			return;
+		}
+
+		const node = { key, expire, expireOn, index: this.heap.length };
+		this.byKey.set(key, node);
+		this.heap.push(node);
+		this._siftUp(node.index);
+	}
+
+	refresh(key: K, expireOn: number) {
+		const expiration = this.byKey.get(key);
+		if (!expiration) return false;
+		const wasFirst = expiration.index === 0;
+		const previousExpireOn = expiration.expireOn;
+		expiration.expireOn = expireOn;
+		this._rebalance(expiration, previousExpireOn);
+		return wasFirst && previousExpireOn !== expireOn;
+	}
+
+	delete(key: K) {
+		const expiration = this.byKey.get(key);
+		if (!expiration) return false;
+		const index = expiration.index;
+		const last = this.heap.pop()!;
+		this.byKey.delete(key);
+		if (index < this.heap.length) {
+			this.heap[index] = last;
+			last.index = index;
+			const parent = Math.floor((index - 1) / 2);
+			if (index > 0 && this._compare(last, this.heap[parent]!) < 0) this._siftUp(index);
+			else this._siftDown(index);
+		}
+		return true;
+	}
+
+	private _compare(left: LimitedCollectionExpirationNode<K>, right: LimitedCollectionExpirationNode<K>) {
+		return left.expireOn - right.expireOn;
+	}
+
+	private _swap(left: number, right: number) {
+		const value = this.heap[left]!;
+		this.heap[left] = this.heap[right]!;
+		this.heap[right] = value;
+		this.heap[left]!.index = left;
+		value.index = right;
+	}
+
+	private _siftUp(index: number) {
+		while (index > 0) {
+			const parent = Math.floor((index - 1) / 2);
+			if (this._compare(this.heap[index]!, this.heap[parent]!) >= 0) break;
+			this._swap(index, parent);
+			index = parent;
+		}
+	}
+
+	private _siftDown(index: number) {
+		while (true) {
+			const left = index * 2 + 1;
+			const right = left + 1;
+			let smallest = index;
+			if (left < this.heap.length && this._compare(this.heap[left]!, this.heap[smallest]!) < 0) smallest = left;
+			if (right < this.heap.length && this._compare(this.heap[right]!, this.heap[smallest]!) < 0) smallest = right;
+			if (smallest === index) break;
+			this._swap(index, smallest);
+			index = smallest;
+		}
+	}
+
+	private _rebalance(expiration: LimitedCollectionExpirationNode<K>, previousExpireOn: number) {
+		if (expiration.expireOn < previousExpireOn) this._siftUp(expiration.index);
+		else if (expiration.expireOn > previousExpireOn) this._siftDown(expiration.index);
+	}
+}
+
+function validateLimitedCollectionExpiration(expire: number) {
+	if (Number.isNaN(expire)) throw new TypeError('LimitedCollection expiration cannot be NaN');
+	if (Number.isFinite(expire) && expire > maxTimerDelay)
+		throw new RangeError('LimitedCollection expiration cannot exceed the maximum timer delay');
+}
 
 export interface LimitedCollectionOptions<K, V> {
 	limit: number;
@@ -221,13 +348,16 @@ export class LimitedCollection<K, V> {
 		expire: 0,
 	};
 
-	private readonly data = new Map<K, LimitedCollectionData<V>>();
+	private readonly data = new Map<K, V>();
+	private expirations: LimitedCollectionExpirationQueue<K> | undefined;
 
 	private readonly options: LimitedCollectionOptions<K, V>;
-	private timeout: NodeJS.Timeout | undefined = undefined;
+	private expirationSchedule: LimitedCollectionExpirationSchedule | undefined;
 
 	constructor(options: Partial<LimitedCollectionOptions<K, V>> = {}) {
 		this.options = MergeOptions(LimitedCollection.default, options);
+		if (Number.isNaN(this.options.limit)) throw new TypeError('LimitedCollection limit cannot be NaN');
+		validateLimitedCollectionExpiration(this.options.expire);
 	}
 
 	/**
@@ -235,6 +365,7 @@ export class LimitedCollection<K, V> {
 	 * @param key The key of the element.
 	 * @param value The value of the element.
 	 * @param customExpire The custom expiration time for the element.
+	 * @returns Whether the configured limit accepted the entry. Reentrant mutations from `onDelete` do not change this result.
 	 * @example
 	 * const collection = new LimitedCollection<number, string>({ limit: 3 });
 	 * collection.set(1, 'one');
@@ -247,26 +378,49 @@ export class LimitedCollection<K, V> {
 	 */
 	set(key: K, value: V, customExpire = this.options.expire) {
 		if (this.options.limit <= 0) {
-			return;
+			return false;
+		}
+		const retained = this.options.limit >= 1;
+		validateLimitedCollectionExpiration(customExpire);
+
+		const expireOn = Number.isFinite(customExpire) && customExpire > 0 ? Date.now() + customExpire : -1;
+		if (expireOn === -1 && !this.expirations) {
+			this.data.set(key, value);
+			if (this.size > this.options.limit) {
+				const iter = this.data.keys();
+				while (this.size > this.options.limit) {
+					const keyValue = iter.next().value!;
+					this.delete(keyValue);
+				}
+			}
+			return retained;
 		}
 
-		const expireOn = Date.now() + customExpire;
-		this.data.set(
-			key,
-			customExpire > 0 ? { value, expire: customExpire, expireOn } : { value, expire: -1, expireOn: -1 },
-		);
+		const previousCloser = this.expirations?.first;
+		const previousExpireOn = previousCloser?.expireOn;
+		this.data.set(key, value);
 
-		if (this.size > this.options.limit) {
-			const iter = this.data.keys();
-			while (this.size > this.options.limit) {
-				const keyValue = iter.next().value;
-				this.delete(keyValue);
+		if (expireOn !== -1) {
+			(this.expirations ??= new LimitedCollectionExpirationQueue()).set(key, customExpire, expireOn);
+		} else {
+			this._removeExpiration(key);
+		}
+
+		try {
+			if (this.size > this.options.limit) {
+				const iter = this.data.keys();
+				while (this.size > this.options.limit) {
+					const keyValue = iter.next().value!;
+					this.delete(keyValue);
+				}
+			}
+		} finally {
+			const closer = this.expirations?.first;
+			if (previousCloser !== closer || previousExpireOn !== closer?.expireOn) {
+				this.rescheduleExpiration();
 			}
 		}
-
-		if (this.closer?.expireOn === expireOn) {
-			this.resetTimeout();
-		}
+		return retained;
 	}
 
 	/**
@@ -280,7 +434,26 @@ export class LimitedCollection<K, V> {
 	 * console.log(rawData); // Output: { value: 'one', expire: -1, expireOn: -1 }
 	 */
 	raw(key: K) {
-		return this.data.get(key);
+		const value = this.data.get(key);
+		if (value === undefined && !this.data.has(key)) {
+			return;
+		}
+		const resolvedValue = value as V;
+
+		if (!this.expirations) {
+			return {
+				value: resolvedValue,
+				expire: -1,
+				expireOn: -1,
+			};
+		}
+
+		const expiration = this.expirations.get(key);
+		return {
+			value: resolvedValue,
+			expire: expiration?.expire ?? -1,
+			expireOn: expiration?.expireOn ?? -1,
+		};
 	}
 
 	/**
@@ -294,15 +467,19 @@ export class LimitedCollection<K, V> {
 	 * console.log(value); // Output: 'one'
 	 */
 	get(key: K) {
-		const data = this.data.get(key);
-		if (this.options.resetOnDemand && data && data.expire !== -1) {
-			const oldExpireOn = data.expireOn;
-			data.expireOn = Date.now() + data.expire;
-			if (this.closer?.expireOn === oldExpireOn) {
-				this.resetTimeout();
-			}
+		const value = this.data.get(key);
+		if (value === undefined && !this.data.has(key)) {
+			return;
 		}
-		return data?.value;
+
+		const expirations = this.expirations;
+		if (!this.options.resetOnDemand || !expirations) {
+			return value;
+		}
+
+		const expiration = expirations.get(key);
+		if (expiration && expirations.refresh(key, Date.now() + expiration.expire)) this.rescheduleExpiration();
+		return value;
 	}
 
 	/**
@@ -330,12 +507,30 @@ export class LimitedCollection<K, V> {
 	 * console.log(collection.delete(2)); // Output: false
 	 */
 	delete(key: K) {
-		const value = this.raw(key);
-		if (value) {
-			if (value.expireOn === this.closer?.expireOn) setImmediate(() => this.resetTimeout());
-			this.options.onDelete?.(key, value.value);
+		return this._delete(key);
+	}
+
+	private _delete(key: K, reschedule = true) {
+		const value = this.data.get(key);
+		if (value === undefined && !this.data.has(key)) {
+			return false;
 		}
-		return this.data.delete(key);
+		const resolvedValue = value as V;
+		this.options.onDelete?.(key, resolvedValue);
+		if (!this.expirations) {
+			return this.data.delete(key);
+		}
+
+		const previousCloser = this.expirations.first;
+		const previousExpireOn = previousCloser?.expireOn;
+
+		const result = this.data.delete(key);
+		this._removeExpiration(key);
+		const closer = this.expirations?.first;
+		if (reschedule && (previousCloser !== closer || previousExpireOn !== closer?.expireOn)) {
+			this.rescheduleExpiration();
+		}
+		return result;
 	}
 
 	/**
@@ -350,20 +545,20 @@ export class LimitedCollection<K, V> {
 	 * console.log(closestElement); // Output: { value: 'three', expire: 500, expireOn: [current timestamp + 500] }
 	 */
 	get closer() {
-		let d: LimitedCollectionData<V> | undefined;
-		for (const value of this.data.values()) {
-			if (value.expire === -1) {
-				continue;
-			}
-			if (!d) {
-				d = value;
-				continue;
-			}
-			if (d.expireOn > value.expireOn) {
-				d = value;
-			}
+		const closer = this.expirations?.first;
+		if (!closer) {
+			return;
 		}
-		return d;
+
+		const value = this.data.get(closer.key);
+		if (value === undefined && !this.data.has(closer.key)) {
+			return;
+		}
+		return {
+			value: value as V,
+			expire: closer.expire,
+			expireOn: closer.expireOn,
+		};
 	}
 
 	/**
@@ -379,56 +574,98 @@ export class LimitedCollection<K, V> {
 		return this.data.size;
 	}
 
-	private resetTimeout() {
-		this.stopTimeout();
-		this.startTimeout();
+	private rescheduleExpiration() {
+		this.cancelExpiration();
+		this.scheduleExpiration();
 	}
 
-	private stopTimeout() {
-		clearTimeout(this.timeout);
-		this.timeout = undefined;
+	private cancelExpiration() {
+		const schedule = this.expirationSchedule;
+		if (!schedule) return;
+		if (schedule.type === 'immediate') clearImmediate(schedule.handle);
+		else clearTimeout(schedule.handle);
+		this.expirationSchedule = undefined;
 	}
 
-	private startTimeout() {
-		const { expireOn, expire } = this.closer || { expire: -1, expireOn: -1 };
-		if (expire === -1) {
+	private scheduleExpiration() {
+		const closer = this.expirations?.first;
+		if (!closer) {
 			return;
 		}
-		if (this.timeout) {
-			this.stopTimeout();
-		}
-		this.timeout = setTimeout(() => {
-			this.clearExpired();
-			this.resetTimeout();
-		}, expireOn - Date.now());
+		const delay = Math.max(0, Math.min(maxTimerDelay, closer.expireOn - Date.now()));
+		const drain = () => {
+			this.expirationSchedule = undefined;
+			try {
+				this.drainExpired(expirationBatchSize);
+			} finally {
+				this.rescheduleExpiration();
+			}
+		};
+		this.expirationSchedule =
+			delay === 0 && typeof setImmediate === 'function'
+				? { type: 'immediate', handle: setImmediate(drain) }
+				: { type: 'timeout', handle: setTimeout(drain, delay) };
 	}
 
 	keys() {
 		return this.data.keys();
 	}
 
-	values() {
+	values(): IterableIterator<V> {
 		return this.data.values();
 	}
 
-	entries() {
+	rawValues(): IterableIterator<LimitedCollectionData<V>> {
+		return (function* (self: LimitedCollection<K, V>) {
+			for (const key of self.data.keys()) {
+				yield self.raw(key)!;
+			}
+		})(this);
+	}
+
+	entries(): IterableIterator<[K, V]> {
 		return this.data.entries();
 	}
 
-	clear() {
-		this.data.clear();
-		this.resetTimeout();
+	rawEntries(): IterableIterator<[K, LimitedCollectionData<V>]> {
+		return (function* (self: LimitedCollection<K, V>) {
+			for (const key of self.data.keys()) {
+				yield [key, self.raw(key)!] as [K, LimitedCollectionData<V>];
+			}
+		})(this);
 	}
 
-	private clearExpired() {
-		for (const [key, value] of this.data) {
-			if (value.expireOn === -1) {
-				continue;
+	[Symbol.iterator]() {
+		return this.entries();
+	}
+
+	clear() {
+		this.cancelExpiration();
+		this.data.clear();
+		this.expirations = undefined;
+	}
+
+	private drainExpired(limit: number) {
+		let deleted = 0;
+		const now = Date.now();
+		while (deleted < limit) {
+			const expiration = this.expirations?.first;
+			if (!expiration || now < expiration.expireOn) break;
+			const expireOn = expiration.expireOn;
+			try {
+				this._delete(expiration.key, false);
+			} catch (error) {
+				if (this.expirations?.get(expiration.key)?.expireOn === expireOn) this._removeExpiration(expiration.key);
+				throw error;
 			}
-			if (Date.now() >= value.expireOn) {
-				this.options.onDelete?.(key, value.value);
-				this.data.delete(key);
-			}
+			deleted++;
 		}
+	}
+
+	private _removeExpiration(key: K) {
+		const expirations = this.expirations;
+		if (!expirations) return;
+		expirations.delete(key);
+		if (expirations.size === 0) this.expirations = undefined;
 	}
 }

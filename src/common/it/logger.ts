@@ -17,7 +17,8 @@ export type LoggerOptions = {
 	saveOnFile?: boolean;
 };
 
-export type CustomCallback = (self: Logger, level: LogLevels, args: unknown[]) => unknown[] | undefined;
+export type CustomizeLoggerCallback = (self: Logger, level: LogLevels, args: unknown[]) => unknown[] | undefined;
+export type AssignFilenameCallback = (self: Logger) => string;
 
 /**
  * Represents a logger utility for logging messages with various log levels.
@@ -28,15 +29,38 @@ export class Logger {
 	 */
 	readonly options: Required<LoggerOptions>;
 
-	static streams: Partial<Record<string, WriteStream>> = {};
 	static saveOnFile?: string[] | 'all';
 	static dirname = 'seyfert-logs';
+
+	private static streams: Partial<Record<string, WriteStream>> = {};
+	private static fileNames: Partial<Record<string, string>> = {};
 	private static createdDir?: true;
+
+	private static __assignFileName: AssignFilenameCallback = self => {
+		const date = new Date();
+		return `${self.name}-${date.getMonth() + 1}-${date.getDate()}-${date.getFullYear()}-${date.getTime()}.log`;
+	};
 
 	/**
 	 * The custom callback function for logging.
 	 */
-	private static __callback?: CustomCallback;
+	private static __memoryCache: { rss: number; ts: number } = { rss: 0, ts: 0 };
+
+	private static __callback: CustomizeLoggerCallback = (self, level, args) => {
+		const color = Logger.colorFunctions.get(level) ?? Logger.noColor;
+		const now = Date.now();
+		if (now - Logger.__memoryCache.ts > 1000) {
+			Logger.__memoryCache = { rss: process.memoryUsage?.()?.rss ?? 0, ts: now };
+		}
+		const date = new Date(now);
+		return [
+			brightBlack(formatMemoryUsage(Logger.__memoryCache.rss)),
+			bgBrightWhite(black(`[${date.toLocaleDateString()} ${date.toLocaleTimeString()}]`)),
+			color(Logger.prefixes.get(level) ?? 'DEBUG'),
+			self.name ? `${self.name} >` : '>',
+			...args,
+		];
+	};
 
 	/**
 	 * Allows customization of the logging behavior by providing a custom callback function.
@@ -45,16 +69,52 @@ export class Logger {
 	 * Logger.customize((logger, level, args) => {
 	 *     // Custom logging implementation
 	 * });
+	 * @returns A disposer that restores the previous callback (no-op if a newer one replaced it).
 	 */
-	static customize(cb: CustomCallback) {
+	static customize(cb: CustomizeLoggerCallback): () => void {
+		const previous = Logger.__callback;
 		Logger.__callback = cb;
+		return () => {
+			if (Logger.__callback === cb) Logger.__callback = previous;
+		};
+	}
+
+	/**
+	 * Returns the current logging callback, so a customizer can chain the previous one.
+	 */
+	static getCustomizer(): CustomizeLoggerCallback {
+		return Logger.__callback;
+	}
+
+	/**
+	 * Customizes the logging filename by providing a callback function.
+	 * The callback receives the logger instance and should return the desired filename.
+	 *
+	 * @param cb - A function that takes the logger instance and returns a string
+	 *              representing the customized filename for the log.
+	 * @example
+	 * Logger.customizeFilename((logger) => {
+	 *     return `${logger.name}-${Date.now()}.log`;
+	 * });
+	 */
+	static customizeFilename(cb: AssignFilenameCallback) {
+		Logger.__assignFileName = cb;
 	}
 
 	static async clearLogs() {
-		for (const i of await promises.readdir(join(process.cwd(), Logger.dirname), { withFileTypes: true })) {
-			if (this.streams[i.name]) await new Promise(res => this.streams[i.name]!.close(res));
-			await promises.unlink(join(process.cwd(), Logger.dirname, i.name)).catch(() => {});
-			delete this.streams[i.name];
+		for (const [fileName, stream] of Object.entries(Logger.streams)) {
+			if (!stream) continue;
+			await new Promise<void>((resolve, reject) =>
+				stream.close(error => {
+					if (error) return reject(error);
+					resolve();
+				}),
+			);
+			delete Logger.streams[fileName];
+		}
+
+		for (const entry of await promises.readdir(join(process.cwd(), Logger.dirname), { withFileTypes: true })) {
+			await promises.unlink(join(process.cwd(), Logger.dirname, entry.name)).catch(() => undefined);
 		}
 	}
 
@@ -125,23 +185,7 @@ export class Logger {
 	rawLog(level: LogLevels, ...args: unknown[]) {
 		if (!this.active) return;
 		if (level < this.level) return;
-
-		let log;
-
-		if (Logger.__callback) {
-			log = Logger.__callback(this, level, args);
-		} else {
-			const color = Logger.colorFunctions.get(level) ?? Logger.noColor;
-			const memoryData = process.memoryUsage?.();
-			const date = new Date();
-			log = [
-				brightBlack(formatMemoryUsage(memoryData?.rss ?? 0)),
-				bgBrightWhite(black(`[${date.toLocaleDateString()} ${date.toLocaleTimeString()}]`)),
-				color(Logger.prefixes.get(level) ?? 'DEBUG'),
-				this.name ? `${this.name} >` : '>',
-				...args,
-			];
-		}
+		const log = Logger.__callback(this, level, args);
 		if (!log) return;
 		this.__write(log);
 		return console.log(...log);
@@ -189,16 +233,20 @@ export class Logger {
 
 	private __write(log: unknown[]) {
 		if (this.saveOnFile || Logger.saveOnFile === 'all' || Logger.saveOnFile?.includes(this.name)) {
-			if (!(Logger.createdDir || existsSync(join(process.cwd(), Logger.dirname)))) {
+			const dirname = join(process.cwd(), Logger.dirname);
+			if (!Logger.createdDir) {
+				if (!existsSync(dirname)) mkdirSync(dirname, { recursive: true });
 				Logger.createdDir = true;
-				mkdirSync(join(process.cwd(), Logger.dirname), { recursive: true });
 			}
-			const date = new Date();
-			const name = `${date.getMonth() + 1}-${date.getDate()}-${date.getFullYear()}${this.name}.log`;
-			if (!Logger.streams[name]) {
-				Logger.streams[name] = createWriteStream(join(process.cwd(), Logger.dirname, name));
+
+			const fileName = (Logger.fileNames[this.name] ??= (() => {
+				return (Logger.fileNames[this.name] = Logger.__assignFileName(this));
+			})());
+
+			if (!Logger.streams[fileName]) {
+				Logger.streams[fileName] = createWriteStream(join(dirname, fileName));
 			}
-			Logger.streams[name]!.write(`${Buffer.from(stripColor(log.join(' ')))}\n`);
+			Logger.streams[fileName]!.write(`${stripColor(log.join(' '))}\n`);
 		}
 	}
 
@@ -249,7 +297,7 @@ export class Logger {
  * @param data The memory usage data.
  * @returns The formatted string representing memory usage.
  */
-function formatMemoryUsage(bytes: number) {
+export function formatMemoryUsage(bytes: number) {
 	const gigaBytes = bytes / 1024 ** 3;
 	if (gigaBytes >= 1) {
 		return `[RAM Usage ${gigaBytes.toFixed(3)} GB]`;

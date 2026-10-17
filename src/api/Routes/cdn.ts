@@ -1,5 +1,5 @@
-import type { BaseCDNUrlOptions, CDNUrlOptions } from '../..';
-import type { StickerExtension } from '../shared';
+import type { BaseCDNUrlOptions, CDNUrlOptions, TagBadgeExtension } from '../..';
+import type { SoundExtension, StickerExtension } from '../shared';
 
 export interface CDNRoute {
 	embed: {
@@ -10,8 +10,8 @@ export interface CDNRoute {
 	avatars(id: string): {
 		get(hash: string, options?: CDNUrlOptions): string;
 	};
-	'avatar-decorations'(userId: string): {
-		get(hash: string, options?: BaseCDNUrlOptions): string;
+	'avatar-decoration-presets'(asset: string): {
+		get(options?: BaseCDNUrlOptions): string;
 	};
 	'channel-icons'(channelId: string): {
 		get(hash: string, options?: BaseCDNUrlOptions): string;
@@ -22,7 +22,7 @@ export interface CDNRoute {
 	splashes(guildId: string): {
 		get(hash: string, options?: BaseCDNUrlOptions): string;
 	};
-	'discovery-splashes'(guidId: string): {
+	'discovery-splashes'(guildId: string): {
 		get(hash: string, options?: BaseCDNUrlOptions): string;
 	};
 	banners(id: string): {
@@ -40,6 +40,9 @@ export interface CDNRoute {
 	};
 	'guild-events'(eventId: string): {
 		get(hash: string, options?: BaseCDNUrlOptions): string;
+	};
+	'guild-tag-badges'(guildId: string): {
+		get(hash: string, options?: BaseCDNUrlOptions<TagBadgeExtension>): string;
 	};
 	emojis(id: string): {
 		get(options?: BaseCDNUrlOptions): string;
@@ -67,6 +70,9 @@ export interface CDNRoute {
 	'guild-events'(id: string): {
 		get(cover: string, options?: BaseCDNUrlOptions): string;
 	};
+	'soundboard-sounds': {
+		get(id: string, options?: { extension: SoundExtension }): string;
+	};
 }
 
 export interface CDNRoute {
@@ -77,4 +83,4 @@ export interface CDNRoute {
 	};
 }
 
-export type UserAvatarDefault = 1 | 2 | 3 | 4 | 5 | number;
+export type UserAvatarDefault = 0 | 1 | 2 | 3 | 4 | 5;

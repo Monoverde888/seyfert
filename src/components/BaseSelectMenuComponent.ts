@@ -1,4 +1,4 @@
-import type { ComponentType } from 'discord-api-types/v10';
+import type { ComponentType } from '../types';
 import { BaseComponent } from './BaseComponent';
 
 export type APISelectMenuComponentTypes =
@@ -13,7 +13,7 @@ export class BaseSelectMenuComponent<T extends APISelectMenuComponentTypes> exte
 		return this.data.custom_id;
 	}
 
-	get disabed() {
+	get disabled() {
 		return this.data.disabled;
 	}
 

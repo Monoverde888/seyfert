@@ -1,0 +1,125 @@
+/**
+ * Types extracted from https://docs.discord.com/developers/topics/permissions
+ */
+
+import type { Permissions, Snowflake } from '../index';
+
+/**
+ * https://docs.discord.com/developers/topics/permissions#role-object
+ */
+export interface APIRole {
+	/**
+	 * Role id
+	 */
+	id: Snowflake;
+	/**
+	 * Role name
+	 */
+	name: string;
+	/**
+	 * Integer representation of hexadecimal color code
+	 * @deprecated
+	 */
+	color: number;
+	/**
+	 * The role's colors
+	 */
+	colors: APIRoleColors;
+	/**
+	 * If this role is pinned in the user listing
+	 */
+	hoist: boolean;
+	/**
+	 * The role icon hash
+	 */
+	icon?: string | null;
+	/**
+	 * The role unicode emoji as a standard emoji
+	 */
+	unicode_emoji?: string | null;
+	/**
+	 * Position of this role
+	 */
+	position: number;
+	/**
+	 * Permission bit set
+	 *
+	 * See https://en.wikipedia.org/wiki/Bit_field
+	 */
+	permissions: Permissions;
+	/**
+	 * Whether this role is managed by an integration
+	 */
+	managed: boolean;
+	/**
+	 * Whether this role is mentionable
+	 */
+	mentionable: boolean;
+	/**
+	 * The tags this role has
+	 */
+	tags?: APIRoleTags;
+	/**
+	 * Role flags
+	 */
+	flags: RoleFlags;
+}
+
+/**
+ * https://docs.discord.com/developers/topics/permissions#role-object-role-colors-object
+ */
+export interface APIRoleColors {
+	/**
+	 *  The primary color for the role
+	 *
+	 * @default 0
+	 */
+	primary_color: number;
+	/**
+	 * The secondary color for the role, this will make the role a gradient between the other provided colors
+	 */
+	secondary_color: number | null;
+	/**
+	 * The tertiary color for the role, this will turn the gradient into a holographic style
+	 */
+	tertiary_color: number | null;
+}
+/**
+ * https://docs.discord.com/developers/topics/permissions#role-object-role-tags-structure
+ */
+export interface APIRoleTags {
+	/**
+	 * The id of the bot this role belongs to
+	 */
+	bot_id?: Snowflake;
+	/**
+	 * Whether this is the guild's premium subscriber role
+	 */
+	premium_subscriber?: null;
+	/**
+	 * The id of the integration this role belongs to
+	 */
+	integration_id?: Snowflake;
+	/**
+	 * The id of this role's subscription sku and listing
+	 */
+	subscription_listing_id?: Snowflake;
+	/**
+	 * Whether this role is available for purchase
+	 */
+	available_for_purchase?: null;
+	/**
+	 * Whether this role is a guild's linked role
+	 */
+	guild_connections?: null;
+}
+
+/**
+ * https://docs.discord.com/developers/topics/permissions#role-object-role-flags
+ */
+export enum RoleFlags {
+	/**
+	 * Role can be selected by members in an onboarding prompt
+	 */
+	InPrompt = 1 << 0,
+}

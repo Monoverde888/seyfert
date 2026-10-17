@@ -1,14 +1,14 @@
-import type { APIAttachment, RESTAPIAttachment } from 'discord-api-types/v10';
 import { randomBytes } from 'node:crypto';
-import path from 'node:path';
-import { type UsingClient, throwError, type RawFile } from '..';
-import type { ImageResolvable, ObjectToLower } from '../common';
-import { Base } from '../structures/extra/Base';
 import { promises } from 'node:fs';
+import path from 'node:path';
+import type { RawFile, UsingClient } from '..';
+import { createValidationMetadata, type ImageResolvable, type ObjectToLower, SeyfertError } from '../common';
+import { Base } from '../structures/extra/Base';
+import { type APIAttachment, AttachmentFlags, type RESTAPIAttachment } from '../types';
 
 export interface AttachmentResolvableMap {
 	url: string;
-	buffer: Buffer | ArrayBuffer;
+	buffer: ReadableStream | Buffer | ArrayBuffer | Uint8Array | Uint8ClampedArray;
 	path: string;
 }
 export type AttachmentResolvable =
@@ -17,8 +17,9 @@ export type AttachmentResolvable =
 	| Attachment;
 export type AttachmentDataType = keyof AttachmentResolvableMap;
 export interface AttachmentData {
-	name: string;
+	filename: string;
 	description: string;
+	is_spoiler?: boolean;
 	resolvable: AttachmentResolvable;
 	type: AttachmentDataType;
 }
@@ -30,7 +31,18 @@ export class Attachment extends Base {
 		public data: APIAttachment,
 	) {
 		super(client);
-		this.__patchThis(data);
+		this.__patchThis({ ...data });
+	}
+
+	toJSON(): APIAttachment {
+		return { ...this.data };
+	}
+
+	/**
+	 * Gets whether the attachment is a spoiler.
+	 */
+	get spoiler(): boolean {
+		return Boolean((this.data.flags ?? 0) & AttachmentFlags.IsSpoiler) || this.data.filename.startsWith('SPOILER_');
 	}
 }
 
@@ -40,7 +52,9 @@ export class AttachmentBuilder {
 	 * @param data - The partial attachment data.
 	 */
 	constructor(
-		public data: Partial<AttachmentData> = { name: `${randomBytes?.(8)?.toString('base64url') || 'default'}.jpg` },
+		public data: Partial<AttachmentData> = {
+			filename: `${randomBytes?.(8)?.toString('base64url') || 'default'}.jpg`,
+		},
 	) {}
 
 	/**
@@ -51,7 +65,7 @@ export class AttachmentBuilder {
 	 * attachment.setName('example.jpg');
 	 */
 	setName(name: string): this {
-		this.data.name = name;
+		this.data.filename = name;
 		return this;
 	}
 
@@ -91,12 +105,10 @@ export class AttachmentBuilder {
 	 * attachment.setSpoiler(true);
 	 */
 	setSpoiler(spoiler: boolean): this {
-		if (spoiler === this.spoiler) return this;
-		if (!spoiler) {
-			this.data.name = this.data.name!.slice('SPOILER_'.length);
-			return this;
+		this.data.is_spoiler = spoiler;
+		if (!spoiler && this.data.filename?.startsWith('SPOILER_')) {
+			this.data.filename = this.data.filename!.slice('SPOILER_'.length);
 		}
-		this.data.name = `SPOILER_${this.data.name}`;
 		return this;
 	}
 
@@ -104,7 +116,7 @@ export class AttachmentBuilder {
 	 * Gets whether the attachment is a spoiler.
 	 */
 	get spoiler(): boolean {
-		return this.data.name?.startsWith('SPOILER_') ?? false;
+		return this.data.is_spoiler ?? this.data.filename?.startsWith('SPOILER_') ?? false;
 	}
 
 	/**
@@ -122,16 +134,16 @@ export class AttachmentBuilder {
  * @returns The resolved REST API attachment.
  */
 export function resolveAttachment(
-	resolve: Attachment | AttachmentData | RESTAPIAttachment,
+	resolve: Attachment | AttachmentBuilder | AttachmentData | RESTAPIAttachment,
 ): Omit<RESTAPIAttachment, 'id'> {
 	if ('id' in resolve) return resolve;
 
 	if (resolve instanceof AttachmentBuilder) {
-		const data = resolve.toJSON();
-		return { filename: data.name, description: data.description };
+		const { filename, description, is_spoiler } = resolve.toJSON();
+		return { filename, description, is_spoiler };
 	}
 
-	return { filename: resolve.name, description: resolve.description };
+	return { filename: resolve.filename, description: resolve.description, is_spoiler: resolve.is_spoiler };
 }
 
 /**
@@ -143,9 +155,9 @@ export async function resolveFiles(resources: (AttachmentBuilder | RawFile | Att
 	const data = await Promise.all(
 		resources.map(async (resource, i) => {
 			if (resource instanceof AttachmentBuilder) {
-				const { type, resolvable, name } = resource.toJSON();
+				const { type, resolvable, filename } = resource.toJSON();
 				const resolve = await resolveAttachmentData(resolvable, type);
-				return { ...resolve, key: `files[${i}]`, name } as RawFile;
+				return { ...resolve, key: `files[${i}]`, filename } as RawFile;
 			}
 			if (resource instanceof Attachment) {
 				const resolve = await resolveAttachmentData(resource.url, 'url');
@@ -153,14 +165,14 @@ export async function resolveFiles(resources: (AttachmentBuilder | RawFile | Att
 					data: resolve.data,
 					contentType: resolve.contentType,
 					key: `files[${i}]`,
-					name: resource.filename,
+					filename: resource.filename,
 				} as RawFile;
 			}
 			return {
 				data: resource.data,
 				contentType: resource.contentType,
 				key: `files[${i}]`,
-				name: resource.name,
+				filename: resource.filename,
 			} as RawFile;
 		}),
 	);
@@ -183,42 +195,73 @@ export async function resolveAttachmentData(
 }> {
 	if (data instanceof AttachmentBuilder) {
 		if (!data.data.resolvable)
-			return throwError('The attachment type has been expressed as attachment but cannot be resolved as one.');
-		return { data: data.data.resolvable! };
+			throw new SeyfertError('INVALID_ATTACHMENT_TYPE', {
+				metadata: {
+					...createValidationMetadata('AttachmentBuilder with resolvable data', data.data.resolvable),
+					detail: 'The attachment type has been expressed as attachment but cannot be resolved as one.',
+				},
+			});
+		return { data: data.data.resolvable };
 	}
 
 	switch (type) {
 		case 'url': {
 			if (!/^https?:\/\//.test(data as string))
-				return throwError(
-					`The attachment type has been expressed as ${type.toUpperCase()} but cannot be resolved as one.`,
-				);
+				throw new SeyfertError('INVALID_ATTACHMENT_TYPE', {
+					metadata: {
+						...createValidationMetadata('string URL starting with http:// or https://', data),
+						detail: `The attachment type has been expressed as ${type.toUpperCase()} but cannot be resolved as one.`,
+					},
+				});
 			const res = await fetch(data as string);
-			return { data: Buffer.from(await res.arrayBuffer()), contentType: res.headers.get('content-type') };
+			if (!res.ok) {
+				throw new SeyfertError('INVALID_ATTACHMENT_TYPE', {
+					metadata: {
+						...createValidationMetadata('successful HTTP response', `${res.status} ${res.statusText}`),
+						detail: `Failed to fetch attachment from URL: ${res.status} ${res.statusText}`,
+					},
+				});
+			}
+			return {
+				data: Buffer.from(await res.arrayBuffer()),
+				contentType: res.headers.get('content-type'),
+			};
 		}
 		case 'path': {
 			const file = path.resolve(data as string);
 			const stats = await promises.stat(file);
 			if (!stats.isFile())
-				return throwError(
-					`The attachment type has been expressed as ${type.toUpperCase()} but cannot be resolved as one.`,
-				);
+				throw new SeyfertError('INVALID_ATTACHMENT_TYPE', {
+					metadata: {
+						...createValidationMetadata('path to an existing file', file),
+						detail: `The attachment type has been expressed as ${type.toUpperCase()} but cannot be resolved as one.`,
+					},
+				});
 			return { data: await promises.readFile(file) };
 		}
 		case 'buffer': {
 			if (Buffer.isBuffer(data)) return { data };
-			// @ts-expect-error
-			if (typeof data[Symbol.asyncIterator] === 'function') {
-				const buffers = [];
-				for await (const resource of data as unknown as AsyncIterable<ArrayBuffer>) buffers.push(Buffer.from(resource));
+			if (data instanceof ArrayBuffer) return { data: Buffer.from(data) };
+			if (data instanceof Uint8Array || data instanceof Uint8ClampedArray) return { data: Buffer.from(data) };
+			if (typeof (data as AsyncIterable<ArrayBuffer>)[Symbol.asyncIterator] === 'function') {
+				const buffers: Buffer[] = [];
+				for await (const resource of data as AsyncIterable<ArrayBuffer>) buffers.push(Buffer.from(resource));
 				return { data: Buffer.concat(buffers) };
 			}
-			return throwError(
-				`The attachment type has been expressed as ${type.toUpperCase()} but cannot be resolved as one.`,
-			);
+			throw new SeyfertError('INVALID_ATTACHMENT_TYPE', {
+				metadata: {
+					...createValidationMetadata('Buffer | ArrayBuffer | AsyncIterable<ArrayBuffer>', data),
+					detail: `The attachment type has been expressed as ${type.toUpperCase()} but cannot be resolved as one.`,
+				},
+			});
 		}
 		default: {
-			return throwError(`The attachment type has been expressed as ${type} but cannot be resolved as one.`);
+			throw new SeyfertError('INVALID_ATTACHMENT_TYPE', {
+				metadata: {
+					...createValidationMetadata('url | path | buffer', type),
+					detail: `The attachment type has been expressed as ${type} but cannot be resolved as one.`,
+				},
+			});
 		}
 	}
 }
@@ -228,8 +271,8 @@ export async function resolveAttachmentData(
  * @param data - The base64 data.
  * @returns The resolved data URL.
  */
-export function resolveBase64(data: string | Buffer) {
-	if (Buffer.isBuffer(data)) return `data:image/jpg;base64,${data.toString('base64')}`;
+export function resolveBase64(data: string | Buffer, contentType = 'image/jpeg') {
+	if (Buffer.isBuffer(data)) return `data:${contentType};base64,${data.toString('base64')}`;
 	return data;
 }
 
@@ -243,19 +286,37 @@ export async function resolveImage(image: ImageResolvable): Promise<string> {
 		const {
 			data: { type, resolvable },
 		} = image;
-		if (type && resolvable) return resolveBase64((await resolveAttachmentData(resolvable, type)).data as Buffer);
-		return throwError(
-			`The attachment type has been expressed as ${(
-				type ?? 'Attachment'
-			).toUpperCase()} but cannot be resolved as one.`,
-		);
+		if (type && resolvable) {
+			const file = await resolveAttachmentData(resolvable, type);
+			return resolveBase64(file.data as Buffer, file.contentType ?? undefined);
+		}
+		throw new SeyfertError('INVALID_ATTACHMENT_TYPE', {
+			metadata: {
+				...createValidationMetadata('AttachmentBuilder with type and resolvable data', {
+					type,
+					resolvable,
+				}),
+				detail: `The attachment type has been expressed as ${(
+					type ?? 'Attachment'
+				).toUpperCase()} but cannot be resolved as one.`,
+			},
+		});
 	}
 
 	if (image instanceof Attachment) {
 		const response = await fetch(image.url);
-		return resolveBase64((await resolveAttachmentData(await response.arrayBuffer(), 'buffer')).data as Buffer);
+		if (!response.ok) {
+			throw new SeyfertError('INVALID_ATTACHMENT_TYPE', {
+				metadata: {
+					...createValidationMetadata('successful HTTP response', `${response.status} ${response.statusText}`),
+					detail: `Failed to fetch attachment from URL: ${response.status} ${response.statusText}`,
+				},
+			});
+		}
+		const file = await resolveAttachmentData(await response.arrayBuffer(), 'buffer');
+		return resolveBase64(file.data as Buffer, response.headers.get('content-type') ?? file.contentType ?? undefined);
 	}
 
 	const file = await resolveAttachmentData(image.data, image.type);
-	return resolveBase64(file.data as Buffer);
+	return resolveBase64(file.data as Buffer, file.contentType ?? undefined);
 }

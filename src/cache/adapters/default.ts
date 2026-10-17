@@ -1,157 +1,188 @@
-import type { Adapter } from './types';
+import { needsCacheStorageIndex } from './shared';
+import type { Adapter, AdapterEntry, AdapterRelationship } from './types';
 
-export class MemoryAdapter implements Adapter {
+export interface MemoryAdapterOptions<T> {
+	encode(data: any): T;
+	decode(data: T): unknown;
+}
+
+export class MemoryAdapter<T> implements Adapter {
 	isAsync = false;
 
-	readonly storage = new Map<string, string>();
-	readonly relationships = new Map<string, string[]>();
+	readonly storage = new Map<string, Map<string, T>>();
+	readonly keyToStorage = new Map<string, string>();
+
+	constructor(
+		public options: MemoryAdapterOptions<T> = {
+			encode(data) {
+				return data;
+			},
+			decode(data) {
+				return data;
+			},
+		},
+	) {}
+
+	start() {
+		//
+	}
 
 	scan(query: string, keys?: false): any[];
 	scan(query: string, keys: true): string[];
 	scan(query: string, keys = false) {
-		const values = [];
+		const values: (string | unknown)[] = [];
 		const sq = query.split('.');
-		for (const [key, value] of this.storage.entries()) {
-			if (key.split('.').every((value, i) => (sq[i] === '*' ? !!value : sq[i] === value))) {
-				values.push(keys ? key : JSON.parse(value));
+		for (const storageEntry of this.storage.values()) {
+			for (const [key, value] of storageEntry) {
+				const keySplit = key.split('.');
+				if (
+					keySplit.length === sq.length &&
+					keySplit.every((segment, i) => (sq[i] === '*' ? !!segment : sq[i] === segment))
+				) {
+					values.push(keys ? key : this.options.decode(value));
+				}
 			}
 		}
 
 		return values;
 	}
 
-	get(keys: string): any;
-	get(keys: string[]): any[];
-	get(keys: string | string[]) {
-		if (!Array.isArray(keys)) {
-			const data = this.storage.get(keys);
-			return data ? JSON.parse(data) : null;
+	bulkGet(keys: string[]) {
+		const result: unknown[] = [];
+		for (const key of keys) {
+			const storageEntry = this._getStorageEntry(key);
+			if (!storageEntry) continue;
+			const data = storageEntry.get(key);
+			if (data !== undefined || storageEntry.has(key)) result.push(this.options.decode(data!));
 		}
-		return keys
-			.map(x => {
-				const data = this.storage.get(x);
-				return data ? JSON.parse(data) : null;
-			})
-			.filter(x => x);
+		return result;
 	}
 
-	set(keys: string, data: any): void;
-	set(keys: [string, any][]): void;
-	set(keys: string | [string, any][], data?: any): void {
-		if (Array.isArray(keys)) {
-			for (const [key, value] of keys) {
-				this.storage.set(key, JSON.stringify(value));
-			}
-		} else {
-			this.storage.set(keys, JSON.stringify(data));
-		}
+	get(key: string) {
+		const storageEntry = this._getStorageEntry(key);
+		if (!storageEntry) return null;
+		const data = storageEntry.get(key);
+		if (data === undefined && !storageEntry.has(key)) return null;
+		return this.options.decode(data!);
 	}
 
-	patch(updateOnly: boolean, keys: string, data: any): void;
-	patch(updateOnly: boolean, keys: [string, any][]): void;
-	patch(updateOnly: boolean, keys: string | [string, any][], data?: any): void {
-		if (Array.isArray(keys)) {
-			for (const [key, value] of keys) {
-				const oldData = this.get(key);
-				if (updateOnly && !oldData) {
-					continue;
-				}
-				this.storage.set(
-					key,
-					Array.isArray(value) ? JSON.stringify(value) : JSON.stringify({ ...(oldData ?? {}), ...value }),
-				);
-			}
-		} else {
-			const oldData = this.get(keys);
-			if (updateOnly && !oldData) {
-				return;
-			}
-			this.storage.set(
-				keys,
-				Array.isArray(data) ? JSON.stringify(data) : JSON.stringify({ ...(oldData ?? {}), ...data }),
-			);
+	private _getStorageNamespace(key: string) {
+		const indexed = this.keyToStorage.get(key);
+		if (indexed !== undefined) return indexed;
+		const resourceEnd = key.indexOf('.');
+		if (resourceEnd === -1) return undefined;
+		const idStart = key.lastIndexOf('.');
+		return key.slice(0, resourceEnd === idStart ? resourceEnd : idStart);
+	}
+
+	private _getStorageEntry(key: string) {
+		const namespace = this._getStorageNamespace(key);
+		if (namespace === undefined) return undefined;
+		const storageEntry = this.storage.get(namespace);
+		if (!storageEntry && this.keyToStorage.get(key) === namespace) this.keyToStorage.delete(key);
+		return storageEntry;
+	}
+
+	private _set(key: string, value: any, relationship: AdapterRelationship, patch: boolean) {
+		const data = patch && !Array.isArray(value) ? { ...(this.get(key) ?? {}), ...value } : value;
+		const encoded = this.options.encode(data);
+		const namespace = relationship[0];
+		let storageEntry = this.storage.get(namespace);
+		if (!storageEntry) {
+			storageEntry = new Map();
+			this.storage.set(namespace, storageEntry);
 		}
+		const indexed = needsCacheStorageIndex(key, namespace);
+		storageEntry.set(key, encoded);
+		if (indexed) this.keyToStorage.set(key, namespace);
+	}
+
+	set(key: string, value: any, relationship: AdapterRelationship) {
+		this._set(key, value, relationship, false);
+	}
+
+	bulkSet(entries: AdapterEntry[]) {
+		for (const [key, value, relationship] of entries) this._set(key, value, relationship, false);
+	}
+
+	patch(key: string, value: any, relationship: AdapterRelationship) {
+		this._set(key, value, relationship, true);
+	}
+
+	bulkPatch(entries: AdapterEntry[]) {
+		for (const [key, value, relationship] of entries) this._set(key, value, relationship, true);
 	}
 
 	values(to: string) {
-		const array: any[] = [];
-		const data = this.keys(to);
-
-		for (const key of data) {
-			const content = this.get(key);
-
-			if (content) {
-				array.push(content);
-			}
-		}
-
-		return array;
+		const storageEntry = this.storage.get(to);
+		if (!storageEntry) return [];
+		const values: any[] = [];
+		for (const value of storageEntry.values()) values.push(this.options.decode(value));
+		return values;
 	}
 
 	keys(to: string) {
-		return this.getToRelationship(to).map(id => `${to}.${id}`);
+		return [...(this.storage.get(to)?.keys() ?? [])];
 	}
 
 	count(to: string) {
-		return this.getToRelationship(to).length;
+		return this.storage.get(to)?.size ?? 0;
 	}
 
-	remove(keys: string): void;
-	remove(keys: string[]): void;
-	remove(keys: string | string[]) {
-		for (const i of Array.isArray(keys) ? keys : [keys]) {
-			this.storage.delete(i);
-		}
+	bulkRemove(keys: string[]) {
+		for (const key of keys) this.remove(key);
+	}
+
+	remove(key: string) {
+		const namespace = this._getStorageNamespace(key);
+		if (namespace === undefined) return;
+		const storageEntry = this.storage.get(namespace);
+		storageEntry?.delete(key);
+		this.keyToStorage.delete(key);
+		if (storageEntry?.size === 0) this.storage.delete(namespace);
 	}
 
 	flush(): void {
 		this.storage.clear();
-		this.relationships.clear();
+		this.keyToStorage.clear();
 	}
 
-	contains(to: string, keys: string): boolean {
-		return this.getToRelationship(to).includes(keys);
+	private _getRelationshipKey(to: string, id: string) {
+		const storageEntry = this.storage.get(to);
+		if (!storageEntry) return undefined;
+		const scopedKey = `${to}.${id}`;
+		if (storageEntry.has(scopedKey)) return scopedKey;
+		const separator = to.indexOf('.');
+		if (separator === -1) return undefined;
+		const globalKey = `${to.slice(0, separator)}.${id}`;
+		return storageEntry.has(globalKey) ? globalKey : undefined;
 	}
 
-	getToRelationship(to: string) {
-		return this.relationships.get(to) || [];
+	contains(to: string, id: string): boolean {
+		return this._getRelationshipKey(to, id) !== undefined;
 	}
 
-	bulkAddToRelationShip(data: Record<string, string[]>) {
-		for (const i in data) {
-			this.addToRelationship(i, data[i]);
-		}
-	}
-
-	addToRelationship(to: string, keys: string | string[]) {
-		if (!this.relationships.has(to)) {
-			this.relationships.set(to, []);
-		}
-
-		const data = this.getToRelationship(to);
-
-		for (const key of Array.isArray(keys) ? keys : [keys]) {
-			if (!data.includes(key)) {
-				data.push(key);
-			}
-		}
+	getToRelationship(to: string): string[] {
+		const storageEntry = this.storage.get(to);
+		if (!storageEntry) return [];
+		const ids: string[] = [];
+		for (const key of storageEntry.keys()) ids.push(key.slice(key.lastIndexOf('.') + 1));
+		return ids;
 	}
 
 	removeToRelationship(to: string, keys: string | string[]) {
-		const data = this.getToRelationship(to);
-		if (data) {
-			for (const key of Array.isArray(keys) ? keys : [keys]) {
-				const idx = data.indexOf(key);
-				if (idx !== -1) {
-					data.splice(idx, 1);
-				}
-			}
+		for (const id of Array.isArray(keys) ? keys : [keys]) {
+			const key = this._getRelationshipKey(to, id);
+			if (key) this.remove(key);
 		}
 	}
 
 	removeRelationship(to: string | string[]) {
-		for (const i of Array.isArray(to) ? to : [to]) {
-			this.relationships.delete(i);
+		for (const relationship of Array.isArray(to) ? to : [to]) {
+			const storageEntry = this.storage.get(relationship);
+			if (!storageEntry) continue;
+			for (const key of storageEntry.keys()) this.keyToStorage.delete(key);
+			this.storage.delete(relationship);
 		}
 	}
 }

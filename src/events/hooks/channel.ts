@@ -1,20 +1,19 @@
+import type { UsingClient } from '../../commands';
+import { toCamelCase } from '../../common';
+import { type AllChannels, channelFrom } from '../../structures';
 import type {
 	GatewayChannelCreateDispatchData,
 	GatewayChannelDeleteDispatchData,
+	GatewayChannelInfoDispatchData,
 	GatewayChannelPinsUpdateDispatchData,
 	GatewayChannelUpdateDispatchData,
-} from 'discord-api-types/v10';
+} from '../../types';
 
-import { toCamelCase } from '../../common';
-import type { AllChannels } from '../../structures';
-import channelFrom from '../../structures/channels';
-import type { UsingClient } from '../../commands';
-
-export const CHANNEL_CREATE = (self: UsingClient, data: GatewayChannelCreateDispatchData) => {
+export const CHANNEL_CREATE = (self: UsingClient, data: GatewayChannelCreateDispatchData): AllChannels => {
 	return channelFrom(data, self);
 };
 
-export const CHANNEL_DELETE = (self: UsingClient, data: GatewayChannelDeleteDispatchData) => {
+export const CHANNEL_DELETE = (self: UsingClient, data: GatewayChannelDeleteDispatchData): AllChannels => {
 	return channelFrom(data, self);
 };
 
@@ -27,4 +26,8 @@ export const CHANNEL_UPDATE = async (
 	data: GatewayChannelUpdateDispatchData,
 ): Promise<[channel: AllChannels, old?: AllChannels]> => {
 	return [channelFrom(data, self), await self.cache.channels?.get(data.id)];
+};
+
+export const CHANNEL_INFO = (_self: UsingClient, data: GatewayChannelInfoDispatchData) => {
+	return toCamelCase(data);
 };

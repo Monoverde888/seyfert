@@ -1,14 +1,12 @@
+import { createValidationMetadata, type RestOrArray, SeyfertError } from '../common';
 import {
-	type APIActionRowComponent,
 	type APIModalInteractionResponseCallbackData,
 	type APITextInputComponent,
 	ComponentType,
 	type TextInputStyle,
-} from 'discord-api-types/v10';
-import type { RestOrArray } from '../common';
-import type { ActionRow } from './ActionRow';
+} from '../types';
+import { fromComponent } from '.';
 import { BaseComponentBuilder, type OptionValuesLength } from './Base';
-import { fromComponent } from './index';
 import type { ModalBuilderComponents, ModalSubmitCallback } from './types';
 
 /**
@@ -17,26 +15,32 @@ import type { ModalBuilderComponents, ModalSubmitCallback } from './types';
  * @example
  * const modal = new Modal();
  * modal.setTitle("Sample Modal");
+ * modal.setCustomId("sample-modal");
  * modal.addComponents(
- *   new ActionRow<TextInput>()
- *   .addComponents(new TextInput().setLabel("Enter text"))
- * ));
+ *   new Label()
+ *     .setLabel("Enter text")
+ *     .setComponent(
+ *       new TextInput()
+ *         .setCustomId("sample-input")
+ *         .setStyle(TextInputStyle.Paragraph)
+ *     )
+ * );
  * modal.run((interaction) => {
  *   // Handle modal submission
  * });
  * const json = modal.toJSON();
  */
-export class Modal<T extends ModalBuilderComponents = TextInput> {
+export class Modal {
 	/** @internal */
 	__exec?: ModalSubmitCallback;
-	components: ActionRow<T>[] = [];
+	components: ModalBuilderComponents[] = [];
 
 	/**
 	 * Creates a new Modal instance.
 	 * @param data - Optional data for the modal.
 	 */
 	constructor(public data: Partial<APIModalInteractionResponseCallbackData> = {}) {
-		this.components = this.components.concat((data.components?.map(fromComponent) as ActionRow<T>[]) ?? []);
+		this.components = this.components.concat((data.components?.map(fromComponent) as ModalBuilderComponents[]) ?? []);
 	}
 
 	/**
@@ -44,7 +48,7 @@ export class Modal<T extends ModalBuilderComponents = TextInput> {
 	 * @param components - Components to be added to the modal.
 	 * @returns The current Modal instance.
 	 */
-	addComponents(...components: RestOrArray<ActionRow<T>>): this {
+	addComponents(...components: RestOrArray<ModalBuilderComponents>): this {
 		this.components = this.components.concat(components.flat());
 		return this;
 	}
@@ -54,7 +58,7 @@ export class Modal<T extends ModalBuilderComponents = TextInput> {
 	 * @param component - The components to set into the modal.
 	 * @returns The current Modal instance.
 	 */
-	setComponents(component: ActionRow<T>[]): this {
+	setComponents(component: ModalBuilderComponents[]): this {
 		this.components = [...component];
 		return this;
 	}
@@ -94,10 +98,28 @@ export class Modal<T extends ModalBuilderComponents = TextInput> {
 	 * @returns The modal data in JSON format.
 	 */
 	toJSON() {
+		if (!this.data.custom_id)
+			throw new SeyfertError('MISSING_MODAL_CUSTOM_ID', {
+				metadata: {
+					...createValidationMetadata('custom_id to be set before calling toJSON()', this.data.custom_id, {
+						component: 'Modal',
+					}),
+					detail: 'Cannot convert to JSON without a custom_id.',
+				},
+			});
+		if (!this.data.title)
+			throw new SeyfertError('MISSING_MODAL_TITLE', {
+				metadata: {
+					...createValidationMetadata('title to be set before calling toJSON()', this.data.title, {
+						component: 'Modal',
+					}),
+					detail: 'Cannot convert to JSON without a title.',
+				},
+			});
 		return {
 			custom_id: this.data.custom_id,
 			title: this.data.title,
-			components: this.components.map(x => x.toJSON() as unknown as APIActionRowComponent<APITextInputComponent>),
+			components: this.components.map(x => x.toJSON()),
 		} as APIModalInteractionResponseCallbackData;
 	}
 }
@@ -105,10 +127,14 @@ export class Modal<T extends ModalBuilderComponents = TextInput> {
 /**
  * Represents a text input component builder.
  * @example
- * const textInput = new TextInput().setLabel("Enter text");
- * textInput.setStyle(TextInputStyle.Paragraph);
- * textInput.setPlaceholder("Type here");
- * const json = textInput.toJSON();
+ * const textInput = new TextInput()
+ *   .setCustomId("feedback")
+ *   .setStyle(TextInputStyle.Paragraph)
+ *   .setPlaceholder("Type here");
+ * const label = new Label()
+ *   .setLabel("Feedback")
+ *   .setComponent(textInput);
+ * const json = label.toJSON();
  */
 export class TextInput extends BaseComponentBuilder<APITextInputComponent> {
 	/**
@@ -126,16 +152,6 @@ export class TextInput extends BaseComponentBuilder<APITextInputComponent> {
 	 */
 	setStyle(style: TextInputStyle): this {
 		this.data.style = style;
-		return this;
-	}
-
-	/**
-	 * Sets the label of the text input.
-	 * @param label - The label of the text input.
-	 * @returns The current TextInput instance.
-	 */
-	setLabel(label: string): this {
-		this.data.label = label;
 		return this;
 	}
 

@@ -1,119 +1,383 @@
-import { filetypeinfo } from 'magic-bytes.js';
-import { randomUUID } from 'node:crypto';
-import { Logger, delay, lazyLoadPackage } from '../common';
-import { snowflakeToTimestamp } from '../structures/extra/functions';
-import type { WorkerData } from '../websocket';
-import type { WorkerSendApiRequest } from '../websocket/discord/worker';
-import { CDNRouter, type ProxyRequestMethod } from './Router';
-import { Bucket } from './bucket';
+import { randomUUID, type UUID } from 'node:crypto';
 import {
-	DefaultUserAgent,
-	OverwrittenMimeTypes,
+	type Awaitable,
+	BASE_HOST,
+	delay,
+	Logger,
+	lazyLoadPackage,
+	SeyfertError,
+	snowflakeToTimestamp,
+} from '../common';
+import { toArrayBuffer, toBuffer } from '../common/it/utils';
+import type { WorkerData } from '../websocket';
+import { WORKER_TIMEOUT_MS, type WorkerSendApiRequest } from '../websocket/discord/worker';
+import { Bucket } from './bucket';
+import { CDNRouter, Router } from './Router';
+import type { APIRoutes } from './Routes';
+import {
 	type ApiHandlerInternalOptions,
 	type ApiHandlerOptions,
+	type ApiRequestBody,
 	type ApiRequestOptions,
+	DefaultUserAgent,
 	type HttpMethods,
 	type RawFile,
 	type RequestHeaders,
+	type RestObserveOptions,
+	type RestObserver,
+	type RestObserverDisposer,
+	type RestObserverEntry,
 } from './shared';
 import { isBufferLike } from './utils/utils';
 
-let parentPort: import('node:worker_threads').MessagePort;
-let workerData: WorkerData;
+export type {
+	RestObserveOptions,
+	RestObserver,
+	RestObserverDisposer,
+	RestObserverEntry,
+	RestObserverFailPayload,
+	RestObserverRatelimitPayload,
+	RestObserverRequestPayload,
+	RestObserverSuccessPayload,
+} from './shared';
 
-export class ApiHandler {
+export interface ApiHandler<TClient = unknown> {
+	/* @internal */
+	_proxy_?: APIRoutes;
+	debugger?: Logger;
+	/* @internal */
+	workerData?: WorkerData;
+}
+
+export type OnRatelimitCallback = (response: Response, request: ApiRequestOptions) => Awaitable<any>;
+export type OnSuccessRequestCallback = (method: HttpMethods, url: `/${string}`, response: Response) => Awaitable<any>;
+export type OnFailRequestCallback = (
+	method: HttpMethods,
+	url: `/${string}`,
+	error: unknown,
+	statusCode?: number,
+) => Awaitable<any>;
+type InternalApiRequestOptions = ApiRequestOptions & { _50xRetries?: number };
+
+// JavaScript timers use a signed 32-bit millisecond delay.
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const MAX_BUCKET_RESET_DELAY_MS = MAX_TIMER_DELAY_MS - 1;
+const MAX_SMART_BUCKET_RESET_AFTER_MS = Math.floor(MAX_TIMER_DELAY_MS / 1.5);
+
+function parseRateLimitCount(raw: string | null, minimum: number): null | number | undefined {
+	if (raw === null) return;
+	if (!/^\d+$/.test(raw)) return null;
+	const value = Number(raw);
+	return Number.isSafeInteger(value) && value >= minimum ? value : null;
+}
+
+function parseRateLimitDelay(value: number | string | null): number | undefined {
+	if (value === null || (typeof value === 'string' && value.trim() === '')) return;
+	const milliseconds = Number(value) * 1000;
+	return Number.isFinite(milliseconds) && milliseconds >= 0 ? milliseconds : undefined;
+}
+
+export class ApiHandler<TClient = unknown> {
 	options: ApiHandlerInternalOptions;
 	globalBlock = false;
 	ratelimits = new Map<string, Bucket>();
 	readyQueue: (() => void)[] = [];
+	private bucketAliases = new Map<string, string>();
+	private globalBlocks = new Map<string, (() => void)[]>();
+	private globalTimers = new Map<string, ReturnType<typeof setTimeout>>();
 	cdn = CDNRouter.createProxy();
-	debugger?: Logger;
 	workerPromises?: Map<string, { resolve: (value: any) => any; reject: (error: any) => any }>;
+	onRatelimit?: OnRatelimitCallback;
+	onSuccessRequest?: OnSuccessRequestCallback;
+	onFailRequest?: OnFailRequestCallback;
+	pluginRestObserverProvider?: () => readonly RestObserverEntry[];
+	pluginRestObserverClient?: TClient;
+	private restObservers = new Map<symbol, RestObserverEntry<TClient>>();
 
 	constructor(options: ApiHandlerOptions) {
 		this.options = {
 			baseUrl: 'api/v10',
-			domain: 'https://discord.com',
+			domain: BASE_HOST,
 			type: 'Bot',
 			...options,
 			userAgent: DefaultUserAgent,
 		};
-		if (options.debug) {
-			this.debugger = new Logger({
-				name: '[API]',
-			});
-		}
+		if (options.debug) this.debug = true;
 
 		const worker_threads = lazyLoadPackage<typeof import('node:worker_threads')>('node:worker_threads');
 
-		if (options.workerProxy && !worker_threads?.parentPort) throw new Error('Cannot use workerProxy without a parent.');
+		if (options.workerProxy && !worker_threads?.parentPort && !process.send)
+			throw new SeyfertError('API_WORKER_PROXY_PARENT_REQUIRED', {
+				metadata: { detail: 'Cannot use workerProxy without a parent.' },
+			});
 		if (options.workerProxy) this.workerPromises = new Map();
 
-		if (worker_threads) {
-			workerData = worker_threads.workerData;
-			if (worker_threads.parentPort) parentPort = worker_threads.parentPort;
+		if (worker_threads?.parentPort) {
+			this.sendMessage = async body => {
+				worker_threads.parentPort!.postMessage(
+					body,
+					body.requestOptions.files
+						?.filter(x => !['string', 'boolean', 'number'].includes(typeof x.data))
+						.map(x => (x.data instanceof Buffer ? toArrayBuffer(x.data) : (x.data as ArrayBuffer))) ?? [],
+				);
+			};
+		} else if (process.send) {
+			this.sendMessage = body => {
+				const data = {
+					...body,
+					requestOptions: {
+						...body.requestOptions,
+						files: body.requestOptions.files?.map(file => {
+							if (file.data instanceof ArrayBuffer) file.data = toBuffer(file.data);
+							return file;
+						}),
+					},
+				};
+				process.send!(data);
+			};
 		}
 	}
 
+	observe(observer: RestObserver<TClient>, _opts?: RestObserveOptions): RestObserverDisposer {
+		const id = Symbol('rest-observer');
+		this.restObservers.set(id, { observer });
+		let disposed = false;
+
+		return () => {
+			if (disposed) return;
+			disposed = true;
+			this.restObservers.delete(id);
+		};
+	}
+
+	set debug(active: boolean) {
+		this.debugger = active
+			? new Logger({
+					name: '[API]',
+				})
+			: undefined;
+	}
+
+	get proxy() {
+		return (this._proxy_ ??= new Router(this).createProxy());
+	}
+
 	globalUnblock() {
+		for (const timer of this.globalTimers.values()) clearTimeout(timer);
+		this.globalTimers.clear();
+		for (const queue of this.globalBlocks.values()) {
+			for (const callback of queue) callback();
+		}
+		this.globalBlocks.clear();
 		this.globalBlock = false;
-		let cb;
+		let cb: (() => void) | undefined;
 		while ((cb = this.readyQueue.shift())) {
 			cb();
 		}
 	}
 
-	#randomUUID(): string {
+	randomUUID(): UUID {
 		const uuid = randomUUID();
-		if (this.workerPromises!.has(uuid)) return this.#randomUUID();
+		if (this.workerPromises!.has(uuid)) return this.randomUUID();
 		return uuid;
 	}
 
-	async request<T = any>(
+	protected sendMessage(_body: WorkerSendApiRequest) {
+		throw new SeyfertError('FUNCTION_NOT_IMPLEMENTED', {
+			metadata: { detail: 'Function not implemented' },
+		});
+	}
+
+	protected postMessage<T = unknown>(body: WorkerSendApiRequest) {
+		this.sendMessage(body);
+		return new Promise<T>((res, rej) => {
+			const timeout = setTimeout(() => {
+				this.workerPromises!.delete(body.nonce);
+				rej(
+					new SeyfertError('WORKER_TIMEOUT', {
+						metadata: {
+							nonce: body.nonce,
+							operation: 'API worker request',
+							detail: `API worker request timed out (nonce: ${body.nonce}).`,
+						},
+					}),
+				);
+			}, WORKER_TIMEOUT_MS);
+			this.workerPromises!.set(body.nonce, {
+				resolve: value => {
+					clearTimeout(timeout);
+					res(value);
+				},
+				reject: reason => {
+					clearTimeout(timeout);
+					rej(reason);
+				},
+			});
+		});
+	}
+
+	private async notifyRequest(method: HttpMethods, url: `/${string}`, request: ApiRequestOptions) {
+		await this.notifyRestObservers('onRequest', () =>
+			freezeRestPayload({
+				client: this.pluginRestObserverClient,
+				method,
+				url,
+				request: readonlyRequestOptions(request),
+			}),
+		);
+	}
+
+	private async notifySuccessRequest(
 		method: HttpMethods,
 		url: `/${string}`,
-		{ auth = true, ...request }: ApiRequestOptions = {},
-	): Promise<T> {
-		if (this.options.workerProxy) {
-			const nonce = this.#randomUUID();
-			parentPort!.postMessage(
-				{
-					method,
-					url,
-					type: 'WORKER_API_REQUEST',
-					workerId: (workerData as WorkerData).workerId,
-					nonce,
-					requestOptions: { auth, ...request },
-				} satisfies WorkerSendApiRequest,
-				request.files
-					?.filter(x => !['string', 'boolean', 'number'].includes(typeof x.data))
-					.map(x => x.data as Buffer | Uint8Array),
-			);
+		response: Response,
+		request: ApiRequestOptions,
+	) {
+		await this.notifyRestObservers('onSuccess', () =>
+			freezeRestPayload({
+				client: this.pluginRestObserverClient,
+				method,
+				url,
+				request: readonlyRequestOptions(request),
+				response,
+			}),
+		);
+		try {
+			await this.onSuccessRequest?.(method, url, response);
+		} catch (error) {
+			this.debugger?.warn('onSuccessRequest callback error', error);
+		}
+	}
 
-			return new Promise<T>((res, rej) => {
-				this.workerPromises!.set(nonce, { reject: rej, resolve: res });
+	private async notifyFailRequest(
+		method: HttpMethods,
+		url: `/${string}`,
+		error: unknown,
+		statusCode: number | undefined,
+		request: ApiRequestOptions,
+	) {
+		await this.notifyRestObservers('onFail', () =>
+			freezeRestPayload({
+				client: this.pluginRestObserverClient,
+				method,
+				url,
+				request: readonlyRequestOptions(request),
+				error,
+				statusCode,
+			}),
+		);
+		try {
+			await this.onFailRequest?.(method, url, error, statusCode);
+		} catch (callbackError) {
+			this.debugger?.warn('onFailRequest callback error', callbackError);
+		}
+	}
+
+	private async notifyRatelimit(
+		response: Response,
+		request: ApiRequestOptions,
+		method: HttpMethods,
+		url: `/${string}`,
+	) {
+		await this.notifyRestObservers('onRatelimit', () =>
+			freezeRestPayload({
+				client: this.pluginRestObserverClient,
+				method,
+				url,
+				request: readonlyRequestOptions(request),
+				response,
+			}),
+		);
+		try {
+			await this.onRatelimit?.(response, request);
+		} catch (error) {
+			this.debugger?.warn('onRatelimit callback error', error);
+		}
+	}
+
+	private async notifyRestObservers(name: keyof RestObserver, createPayload: () => unknown) {
+		let payload: unknown;
+		let hasPayload = false;
+		const getPayload = () => {
+			if (!hasPayload) {
+				payload = createPayload();
+				hasPayload = true;
+			}
+			return payload;
+		};
+
+		await this.notifyRestObserverEntries(name, getPayload, this.pluginRestObserverProvider?.() ?? []);
+		await this.notifyRestObserverEntries(name, getPayload, this.restObservers.values());
+	}
+
+	private async notifyRestObserverEntries(
+		name: keyof RestObserver,
+		getPayload: () => unknown,
+		entries: Iterable<RestObserverEntry>,
+	) {
+		for (const entry of entries) {
+			const observer = entry.observer[name];
+			if (!observer) continue;
+			const payload = getPayload();
+			try {
+				await (observer as (payload: unknown) => Awaitable<unknown>)(payload);
+			} catch (error) {
+				const source = entry.plugin ? `[plugin:${entry.plugin}] ` : '';
+				this.debugger?.warn(`${source}REST observer "${name}" callback error`, error);
+			}
+		}
+	}
+
+	async request<T = unknown>(method: HttpMethods, url: `/${string}`, request: ApiRequestOptions = {}): Promise<T> {
+		const requestOptions = { ...request } as InternalApiRequestOptions;
+		const { auth = true } = requestOptions;
+		let attempts = requestOptions._50xRetries ?? 0;
+		delete requestOptions._50xRetries;
+		const originTrace: { stack?: string } = {};
+		Error.captureStackTrace(originTrace, this.request);
+
+		if (this.options.workerProxy) {
+			const nonce = this.randomUUID();
+			return this.postMessage<T>({
+				method,
+				url,
+				type: 'WORKER_API_REQUEST',
+				workerId: this.workerData!.workerId,
+				nonce,
+				requestOptions: { auth, ...requestOptions },
 			});
 		}
-		const route = request.route || this.routefy(url, method);
-		let attempts = 0;
+		const route = requestOptions.route || this.routefy(url, method);
+		const provisionalRoute = requestOptions.route || `${method}:${route}`;
+		let bucketRoute = this.bucketAliases.get(provisionalRoute) ?? provisionalRoute;
 
 		const callback = async (next: () => void, resolve: (data: any) => void, reject: (err: unknown) => void) => {
 			const headers = {
 				'User-Agent': this.options.userAgent,
 			} satisfies RequestHeaders;
 
-			const { data, finalUrl } = this.parseRequest({
-				url,
-				headers,
-				request: { ...request, auth },
-			});
-
-			let response;
+			let data: string | FormData | undefined;
+			let finalUrl: `/${string}`;
 
 			try {
-				const url = `${this.options.domain}/${this.options.baseUrl}${finalUrl}`;
+				({ data, finalUrl } = this.parseRequest({
+					url,
+					headers,
+					request: { ...requestOptions, auth },
+				}));
+			} catch (err) {
+				next();
+				reject(err);
+				return;
+			}
+
+			let response: Response;
+
+			try {
+				const requestUrl = `${this.options.domain}/${this.options.baseUrl}${finalUrl}`;
+				await this.notifyRequest(method, finalUrl, { ...request, auth });
 				this.debugger?.debug(`Sending, Method: ${method} | Url: [${finalUrl}](${route}) | Auth: ${auth}`);
-				response = await fetch(url, {
+				response = await fetch(requestUrl, {
 					method,
 					headers,
 					body: data,
@@ -121,6 +385,7 @@ export class ApiHandler {
 				this.debugger?.debug(`Received response: ${response.statusText}(${response.status})`);
 			} catch (err) {
 				this.debugger?.debug('Fetch error', err);
+				await this.notifyFailRequest(method, finalUrl, err, undefined, { ...request, auth });
 				next();
 				reject(err);
 				return;
@@ -129,103 +394,226 @@ export class ApiHandler {
 			const now = Date.now();
 			const headerNow = Date.parse(response.headers.get('date') ?? '');
 
-			this.setRatelimitsBucket(route, response);
-			this.setResetBucket(route, response, now, headerNow);
+			bucketRoute = this.learnBucket(provisionalRoute, bucketRoute, url, response, requestOptions.route !== undefined);
+			this.setRatelimitsBucket(bucketRoute, response);
+			this.setResetBucket(bucketRoute, response, now, headerNow, route);
+			this.ratelimits.get(bucketRoute)!.process();
 
-			let result: string | Record<string, any> = await response.text();
+			const observerResponse = response.clone();
+			let result: unknown;
+			try {
+				result = await decodeResponse(response);
+			} catch (error) {
+				await this.notifyFailRequest(method, finalUrl, error, response.status, { ...request, auth });
+				next();
+				reject(error);
+				return;
+			}
 
 			if (response.status >= 300) {
+				const errorResult = normalizeErrorResult(result);
 				if (response.status === 429) {
-					const result429 = await this.handle429(route, method, url, request, response, result, next, reject, now);
+					const result429 = await this.handle429(
+						bucketRoute,
+						method,
+						url,
+						{ ...request, auth },
+						observerResponse,
+						typeof errorResult === 'string' ? errorResult : JSON.stringify(errorResult),
+						next,
+						reject,
+						now,
+						finalUrl,
+					);
 					if (result429 !== false) return resolve(result429);
-					return this.clearResetInterval(route);
+					await this.notifyFailRequest(method, finalUrl, errorResult, response.status, { ...request, auth });
+					return this.clearResetInterval(bucketRoute);
 				}
 				if ([502, 503].includes(response.status) && ++attempts < 4) {
-					this.clearResetInterval(route);
-					return this.handle50X(method, url, request, next);
+					this.clearResetInterval(bucketRoute);
+					return this.handle50X(method, url, requestOptions, attempts, next, resolve, reject);
 				}
-				this.clearResetInterval(route);
+				this.clearResetInterval(bucketRoute);
 				next();
-				if (result.length > 0) {
-					if (response.headers.get('content-type') === 'application/json') {
-						try {
-							result = JSON.parse(result);
-						} catch (err) {
-							this.debugger?.warn('Error parsing result error (', result, ')', err);
-							reject(err);
-							return;
-						}
-					}
-				}
-				const parsedError = this.parseError(response, result);
-				this.debugger?.warn(parsedError);
+				const parsedError = this.parseError(method, route, response, errorResult, originTrace);
+				this.debugger?.warn(parsedError.message);
+				await this.notifyFailRequest(method, finalUrl, parsedError, response.status, { ...request, auth });
 				reject(parsedError);
 				return;
 			}
 
-			if (result.length > 0) {
-				if (response.headers.get('content-type') === 'application/json') {
-					try {
-						result = JSON.parse(result);
-					} catch (err) {
-						this.debugger?.warn('Error parsing result (', result, ')', err);
-						next();
-						reject(err);
-						return;
-					}
-				}
-			}
-
+			await this.notifySuccessRequest(method, finalUrl, observerResponse, { ...request, auth });
 			next();
-			return resolve((result || undefined) as T);
+			return resolve(result);
 		};
 
 		return new Promise((resolve, reject) => {
-			if (this.globalBlock && auth) {
-				this.readyQueue.push(() => {
-					if (!this.ratelimits.has(route)) {
-						this.ratelimits.set(route, new Bucket(1));
-					}
-					this.ratelimits.get(route)!.push({ next: callback, resolve, reject }, request.unshift);
-				});
-			} else {
-				if (!this.ratelimits.has(route)) {
-					this.ratelimits.set(route, new Bucket(1));
+			const dispatch = () => {
+				bucketRoute = this.bucketAliases.get(provisionalRoute) ?? bucketRoute;
+				if (!this.ratelimits.has(bucketRoute)) {
+					this.ratelimits.set(bucketRoute, new Bucket(1));
 				}
-				this.ratelimits.get(route)!.push({ next: callback, resolve, reject }, request.unshift);
+				this.ratelimits.get(bucketRoute)!.push({ next: callback, resolve, reject }, request.unshift);
+			};
+			const globalQueue = this.globalBlocks.get(this.globalRateLimitKey({ ...requestOptions, auth }));
+			if (globalQueue && !url.startsWith('/interactions/')) {
+				globalQueue.push(dispatch);
+			} else {
+				dispatch();
 			}
 		});
 	}
 
-	parseError(response: Response, result: unknown) {
-		let errMessage = '';
-		if (typeof result === 'object' && result) {
-			if ('message' in result) {
-				errMessage += `${result.message}${'code' in result ? ` ${result.code}` : ''}\n`;
-			}
+	private learnBucket(
+		provisionalRoute: string,
+		currentRoute: string,
+		url: `/${string}`,
+		response: Response,
+		hasRouteOverride: boolean,
+	) {
+		const hash = response.headers.get('x-ratelimit-bucket');
+		if (!hash || hasRouteOverride) return currentRoute;
 
-			if ('errors' in result && result) {
-				errMessage += `${JSON.stringify(result.errors, null, 2)}\n`;
-			}
+		const learnedRoute = `${hash}:${majorParameter(url)}`;
+		this.bucketAliases.set(provisionalRoute, learnedRoute);
+
+		const currentBucket = this.ratelimits.get(currentRoute)!;
+		const learnedBucket = this.ratelimits.get(learnedRoute);
+		if (!learnedBucket) {
+			this.ratelimits.set(learnedRoute, currentBucket);
+			return learnedRoute;
 		}
-		if (response.status) {
-			return new Error(errMessage ?? response.statusText);
+		if (learnedBucket !== currentBucket && currentBucket.queue.length) {
+			learnedBucket.queue.push(...currentBucket.queue.splice(0));
 		}
-		return new Error('Unknown error');
+		return learnedRoute;
 	}
 
-	async handle50X(method: HttpMethods, url: `/${string}`, request: ApiRequestOptions, next: () => void) {
+	private globalRateLimitKey(request: ApiRequestOptions) {
+		if (request.auth === false) return 'unauthenticated';
+		return `${this.options.type}:${request.token || this.options.token}`;
+	}
+
+	private blockGlobal(request: ApiRequestOptions, retryAfter: number) {
+		const key = this.globalRateLimitKey(request);
+		if (!this.globalBlocks.has(key)) this.globalBlocks.set(key, []);
+		const previousTimer = this.globalTimers.get(key);
+		if (previousTimer) clearTimeout(previousTimer);
+		this.globalBlock = true;
+		this.globalTimers.set(
+			key,
+			setTimeout(() => this.unblockGlobal(key), retryAfter || 1),
+		);
+	}
+
+	private unblockGlobal(key: string) {
+		this.globalTimers.delete(key);
+		const queue = this.globalBlocks.get(key) ?? [];
+		this.globalBlocks.delete(key);
+		this.globalBlock = this.globalBlocks.size > 0;
+		for (const callback of queue) callback();
+	}
+
+	parseError(
+		method: HttpMethods,
+		route: `/${string}`,
+		response: Response,
+		result: string | Record<string, any>,
+		originTrace?: { stack?: string },
+	) {
+		let errMessage = '';
+		let code: string | undefined;
+		const metadata: Record<string, unknown> = {
+			method,
+			route,
+			status: response.status,
+			statusText: response.statusText,
+		};
+		if (typeof result === 'object') {
+			if (typeof result.code !== 'undefined') {
+				code = String(result.code);
+			}
+			metadata.response = result;
+			errMessage += `${result.message ?? 'Unknown'} ${result.code ?? ''}\n[${response.status} ${response.statusText}] ${method} ${route}`;
+
+			if ('errors' in result) {
+				const errors = this.parseValidationError(result.errors);
+				errMessage += `\n${errors.join('\n') || JSON.stringify(result.errors, null, 2)}`;
+			}
+		} else {
+			errMessage = `[${response.status} ${response.statusText}] ${method} ${route}`;
+		}
+
+		const error = new SeyfertError(`API_${response.statusText}_${code}`, {
+			metadata: {
+				...metadata,
+				detail: errMessage,
+			},
+		});
+		const originStack = originTrace?.stack;
+		if (originStack) {
+			const originLines = originStack
+				.split('\n')
+				.slice(1)
+				.filter(
+					line =>
+						!line.includes('node:internal') &&
+						!line.includes('/src/api/api.ts') &&
+						!line.includes('\\src\\api\\api.ts'),
+				);
+
+			if (originLines.length) {
+				error.stack = `${error.name}: ${error.message}\n${originLines.join('\n')}`;
+			}
+		}
+
+		return error;
+	}
+
+	parseValidationError(data: Record<string, any>, path = '', errors: string[] = []) {
+		for (const key in data) {
+			if (key === '_errors') {
+				for (const error of data[key]) {
+					errors.push(`${path.slice(0, -1)} [${error.code}]: ${error.message}`);
+				}
+			} else if (typeof data[key] === 'object') {
+				this.parseValidationError(data[key], `${path}${key}.`, errors);
+			}
+		}
+
+		return errors;
+	}
+
+	async handle50X(
+		method: HttpMethods,
+		url: `/${string}`,
+		request: ApiRequestOptions,
+		attempts: number | (() => void),
+		next: () => void = () => {},
+		resolve?: (value: unknown) => void,
+		reject?: (err: unknown) => void,
+	) {
+		const retryAttempt = typeof attempts === 'number' ? attempts : 0;
+		const callback = typeof attempts === 'function' ? attempts : next;
+		const requestOptions = {
+			...request,
+			unshift: true,
+			...(retryAttempt > 0 ? { _50xRetries: retryAttempt } : {}),
+		};
+
 		const wait = Math.floor(Math.random() * 1900 + 100);
 		this.debugger?.warn(`Handling a 50X status, retrying in ${wait}ms`);
-		next();
+		callback();
 		await delay(wait);
-		return this.request(method, url, {
-			body: request.body,
-			auth: request.auth,
-			reason: request.reason,
-			route: request.route,
-			unshift: true,
-		});
+		return this.request(method, url, requestOptions as ApiRequestOptions)
+			.then(value => {
+				resolve?.(value);
+				return value;
+			})
+			.catch(error => {
+				reject?.(error);
+				throw error;
+			});
 	}
 
 	async handle429(
@@ -234,50 +622,71 @@ export class ApiHandler {
 		url: `/${string}`,
 		request: ApiRequestOptions,
 		response: Response,
-		result: any,
+		result: string,
 		next: () => void,
 		reject: (err: unknown) => void,
 		now: number,
+		notifyUrl: `/${string}`,
 	) {
-		const content = typeof request === 'object' ? `${JSON.stringify(request)} ` : '';
-		let retryAfter;
+		const bucket = this.ratelimits.get(route)!;
+		let retryAfter: number | undefined;
 
+		let data: Record<string, unknown> | undefined;
 		try {
-			retryAfter = JSON.parse(result).retry_after * 1000;
-		} catch (err) {
-			this.debugger?.warn(`Unexpected error: ${err}`);
-			reject(err);
+			const parsed: unknown = JSON.parse(result);
+			if (isPlainObject(parsed)) data = parsed;
+		} catch {}
+		if (typeof data?.retry_after === 'number') {
+			const value = parseRateLimitDelay(data.retry_after);
+			if (value !== undefined && value <= MAX_TIMER_DELAY_MS) retryAfter = Math.ceil(value);
+		}
+		for (const header of ['retry-after', 'x-ratelimit-reset-after']) {
+			if (retryAfter !== undefined) break;
+			const value = parseRateLimitDelay(response.headers.get(header));
+			if (value !== undefined && value <= MAX_TIMER_DELAY_MS) retryAfter = value;
+		}
+
+		if (retryAfter === undefined) {
+			await this.notifyRatelimit(response, request, method, notifyUrl);
+			this.debugger?.warn(`${route} Could not extract retry_after from 429 response. ${result}`);
+			next();
+			reject(
+				new SeyfertError('INVALID_RETRY_AFTER', {
+					metadata: {
+						...{
+							route,
+							method,
+							status: response.status,
+							result,
+						},
+						detail: 'Could not extract retry_after from 429 response.',
+					},
+				}),
+			);
 			return false;
 		}
-
-		this.debugger?.info(
-			`${
-				response.headers.get('x-ratelimit-global') ? 'Global' : 'Unexpected'
-			} 429: ${result}\n${content} ${now} ${route} ${response.status}: ${this.ratelimits.get(route)!.remaining}/${
-				this.ratelimits.get(route)!.limit
-			} left | Reset ${retryAfter} (${this.ratelimits.get(route)!.reset - now}ms left) | Scope ${response.headers.get(
-				'x-ratelimit-scope',
-			)}`,
-		);
-		if (retryAfter) {
-			await delay(retryAfter);
-			next();
-			return this.request(method, url, {
-				body: request.body,
-				auth: request.auth,
-				reason: request.reason,
-				route: request.route,
-				unshift: true,
-			});
+		if (
+			data?.global === true ||
+			response.headers.has('x-ratelimit-global') ||
+			response.headers.get('x-ratelimit-scope') === 'global'
+		) {
+			this.blockGlobal(request, retryAfter);
 		}
-		next();
-		return this.request(method, url, {
-			body: request.body,
-			auth: request.auth,
-			reason: request.reason,
-			route: request.route,
+		await this.notifyRatelimit(response, request, method, notifyUrl);
+
+		if (this.debugger) {
+			const content = `${JSON.stringify(request)} `;
+			this.debugger.info(
+				`${response.headers.get('x-ratelimit-global') ? 'Global' : 'Unexpected'} 429: ${result.slice(0, 256)}\n${content} ${now} ${route} ${response.status}: ${bucket.remaining}/${bucket.limit} left | Reset ${retryAfter} (${bucket.reset - now}ms left) | Scope ${response.headers.get('x-ratelimit-scope')}`,
+			);
+		}
+		if (retryAfter) await delay(retryAfter);
+		const retry = this.request(method, url, {
+			...request,
 			unshift: true,
 		});
+		next();
+		return retry.catch(reject);
 	}
 
 	clearResetInterval(route: string) {
@@ -286,87 +695,96 @@ export class ApiHandler {
 		this.ratelimits.get(route)!.resetAfter = 0;
 	}
 
-	setResetBucket(route: string, resp: Response, now: number, headerNow: number) {
-		const retryAfter = Number(resp.headers.get('x-ratelimit-reset-after') || resp.headers.get('retry-after')) * 1000;
+	setResetBucket(route: string, resp: Response, now: number, headerNow: number, normalizedRoute = route) {
+		const bucket = this.ratelimits.get(route)!;
+		const retryAfterHeader = resp.headers.get('x-ratelimit-reset-after') ?? resp.headers.get('retry-after');
+		const retryAfter = parseRateLimitDelay(retryAfterHeader);
 
-		if (retryAfter >= 0) {
-			if (resp.headers.get('x-ratelimit-global')) {
-				this.globalBlock = true;
-				setTimeout(() => this.globalUnblock(), retryAfter || 1);
-			} else {
-				this.ratelimits.get(route)!.reset = (retryAfter || 1) + now;
+		if (retryAfter !== undefined) {
+			bucket.reset = Math.min(retryAfter || 1, MAX_BUCKET_RESET_DELAY_MS) + now;
+		} else {
+			const resetHeader = resp.headers.get('x-ratelimit-reset');
+			const parsedReset = parseRateLimitDelay(resetHeader);
+			if (parsedReset === undefined) {
+				if (retryAfterHeader === null && resetHeader === null) bucket.reset = now;
+				return;
 			}
-		} else if (resp.headers.get('x-ratelimit-reset')) {
-			let resetTime = +resp.headers.get('x-ratelimit-reset')! * 1000;
-			if (route.endsWith('/reactions/:id') && +resp.headers.get('x-ratelimit-reset')! * 1000 - headerNow === 1000) {
+
+			let resetTime = parsedReset;
+			if (normalizedRoute.endsWith('/reactions/:id') && resetTime - headerNow === 1000) {
 				resetTime = now + 250;
 			}
-			this.ratelimits.get(route)!.reset = Math.max(resetTime, now);
-		} else {
-			this.ratelimits.get(route)!.reset = now;
+			bucket.reset = Math.min(Math.max(resetTime, now), now + MAX_BUCKET_RESET_DELAY_MS);
 		}
 	}
 
 	setRatelimitsBucket(route: string, resp: Response) {
-		if (resp.headers.get('x-ratelimit-limit')) {
-			this.ratelimits.get(route)!.limit = +resp.headers.get('x-ratelimit-limit')!;
+		const bucket = this.ratelimits.get(route)!;
+		const limit = parseRateLimitCount(resp.headers.get('x-ratelimit-limit'), 1);
+		const remaining = parseRateLimitCount(resp.headers.get('x-ratelimit-remaining'), 0);
+		if (limit !== null && limit !== undefined) {
+			bucket.limit = limit;
+			bucket.remaining = Math.min(bucket.remaining, limit);
+		}
+		if (remaining === undefined) {
+			bucket.remaining = Math.min(1, bucket.limit);
+		} else if (remaining !== null) {
+			bucket.remaining = Math.min(remaining, bucket.limit);
 		}
 
-		this.ratelimits.get(route)!.remaining =
-			resp.headers.get('x-ratelimit-remaining') === undefined ? 1 : +resp.headers.get('x-ratelimit-remaining')!;
-
 		if (this.options.smartBucket) {
-			if (
-				resp.headers.get('x-ratelimit-reset-after') &&
-				!this.ratelimits.get(route)!.resetAfter &&
-				Number(resp.headers.get('x-ratelimit-limit')) === Number(resp.headers.get('x-ratelimit-remaining')) + 1
-			) {
-				this.ratelimits.get(route)!.resetAfter = +resp.headers.get('x-ratelimit-reset-after')! * 1000;
+			if (typeof limit === 'number' && typeof remaining === 'number' && !bucket.resetAfter && limit === remaining + 1) {
+				const resetAfter = parseRateLimitDelay(resp.headers.get('x-ratelimit-reset-after'));
+				if (resetAfter !== undefined && resetAfter <= MAX_SMART_BUCKET_RESET_AFTER_MS) {
+					bucket.resetAfter = resetAfter;
+				}
 			}
 
-			if (this.ratelimits.get(route)!.resetAfter && !this.ratelimits.get(route)!.remaining) {
-				this.ratelimits.get(route)!.triggerResetAfter();
+			if (bucket.resetAfter && !bucket.remaining) {
+				bucket.triggerResetAfter();
 			}
 		}
 	}
 
-	parseRequest(options: {
-		url: string;
-		headers: RequestHeaders;
-		request: ApiRequestOptions;
-	}) {
+	parseRequest(options: { url: string; headers: RequestHeaders; request: ApiRequestOptions }) {
 		let finalUrl = options.url;
 		let data: string | FormData | undefined;
 		if (options.request.auth) {
-			options.headers.Authorization = `${this.options.type} ${options.request.token || this.options.token}`;
+			const token = options.request.token || this.options.token;
+			if (token === 'INVALID' || typeof token !== 'string' || token.length === 0) {
+				throw new SeyfertError('INVALID_TOKEN', { metadata: { detail: 'token is not a string' } });
+			}
+			options.headers.Authorization = `${this.options.type} ${token}`;
 		}
 		if (options.request.query) {
-			finalUrl += `?${new URLSearchParams(options.request.query)}`;
+			const params = new URLSearchParams();
+			for (const [key, value] of Object.entries(options.request.query)) {
+				if (value === null || value === undefined) continue;
+				if (Array.isArray(value)) {
+					for (const item of value) {
+						if (item === null || item === undefined) continue;
+						params.append(key, String(item));
+					}
+				} else {
+					params.append(key, String(value));
+				}
+			}
+			const query = params.toString();
+			if (query) finalUrl += `${finalUrl.includes('?') ? '&' : '?'}${query}`;
 		}
-		if (options.request.files) {
+
+		if (options.request.files?.length || options.request.appendToFormData) {
 			const formData = new FormData();
 
-			for (const [index, file] of options.request.files.entries()) {
+			for (const [index, file] of options.request.files?.entries() ?? []) {
 				const fileKey = file.key ?? `files[${index}]`;
-
-				if (isBufferLike(file.data)) {
-					let contentType = file.contentType;
-
-					if (!contentType) {
-						const [parsedType] = filetypeinfo(file.data);
-
-						if (parsedType) {
-							contentType =
-								OverwrittenMimeTypes[parsedType.mime as keyof typeof OverwrittenMimeTypes] ??
-								parsedType.mime ??
-								'application/octet-stream';
-						}
-					}
-
-					formData.append(fileKey, new Blob([file.data], { type: contentType }), file.name);
-				} else {
-					formData.append(fileKey, new Blob([`${file.data}`], { type: file.contentType }), file.name);
-				}
+				const blobContent = isBufferLike(file.data)
+					? file.data instanceof ArrayBuffer
+						? file.data
+						: toArrayBuffer(file.data)
+					: `${file.data}`;
+				const blob = new Blob([blobContent], { type: file.contentType });
+				formData.append(fileKey, blob, file.filename);
 			}
 
 			if (options.request.body) {
@@ -378,6 +796,7 @@ export class ApiHandler {
 					formData.append('payload_json', JSON.stringify(options.request.body));
 				}
 			}
+
 			data = formData;
 		} else if (options.request.body) {
 			options.headers['Content-Type'] = 'application/json';
@@ -404,7 +823,7 @@ export class ApiHandler {
 
 		if (method === 'DELETE' && route.endsWith('/messages/:id')) {
 			const messageID = url.slice(url.lastIndexOf('/') + 1);
-			const createdAt = Number(snowflakeToTimestamp(messageID));
+			const createdAt = snowflakeToTimestamp(messageID);
 			if (Date.now() - createdAt >= 1000 * 60 * 60 * 24 * 14) {
 				method += '_OLD';
 			} else if (Date.now() - createdAt <= 1000 * 10) {
@@ -424,29 +843,95 @@ export class ApiHandler {
 	}
 }
 
-export type RequestOptions = Pick<ApiRequestOptions, 'reason' | 'auth' | 'appendToFormData'>;
-export type RequestObject<
-	M extends ProxyRequestMethod,
-	B = Record<string, any>,
-	Q = Record<string, any>,
-	F extends RawFile[] = RawFile[],
-> = {
-	query?: Q;
-} & RequestOptions &
-	(M extends `${ProxyRequestMethod.Get}`
-		? unknown
-		: {
-				body?: B;
-				files?: F;
-			});
+export type RequestOptions = Pick<ApiRequestOptions, 'reason' | 'auth' | 'appendToFormData' | 'token'>;
 
 export type RestArguments<
-	M extends ProxyRequestMethod,
-	B = any,
-	Q extends never | Record<string, any> = any,
+	B extends ApiRequestBody | undefined,
+	Q extends never | Record<string, any> = never,
 	F extends RawFile[] = RawFile[],
-> = M extends ProxyRequestMethod.Get
-	? Q extends never
-		? RequestObject<M, never, B, never>
-		: never
-	: RequestObject<M, B, Q, F>;
+> = (
+	| {
+			body: B;
+			files?: F;
+	  }
+	| (Q extends never | undefined
+			? {}
+			: {
+					query?: Q;
+				})
+) &
+	RequestOptions;
+
+export type RestArgumentsNoBody<Q extends never | Record<string, any> = never> = {
+	query?: Q;
+	files?: RawFile[];
+} & RequestOptions;
+
+export type RestArgumentsRequiredQuery<Q extends Record<string, any>> = Omit<RestArgumentsNoBody<Q>, 'query'> & {
+	query: Q;
+};
+
+function freezeRestPayload<T extends object>(payload: T): Readonly<T> {
+	return Object.freeze(payload);
+}
+
+function readonlyRequestOptions(request: ApiRequestOptions): Readonly<ApiRequestOptions> {
+	const clone: ApiRequestOptions = deepClonePlain({
+		...request,
+		body: request.body ? deepClonePlain(request.body) : undefined,
+		query: request.query ? deepClonePlain(request.query) : undefined,
+		files: request.files?.map(file => deepClonePlain(file)),
+	});
+	return deepFreezePlain(clone);
+}
+
+function deepClonePlain<T>(value: T): T {
+	if (Array.isArray(value)) return value.map(deepClonePlain) as T;
+	if (!isPlainObject(value)) return value;
+	return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, deepClonePlain(entry)])) as T;
+}
+
+function deepFreezePlain<T>(value: T): Readonly<T> {
+	if (Array.isArray(value)) {
+		for (const entry of value) deepFreezePlain(entry);
+		return Object.freeze(value) as Readonly<T>;
+	}
+	if (!isPlainObject(value)) return value as Readonly<T>;
+	for (const entry of Object.values(value)) deepFreezePlain(entry);
+	return Object.freeze(value) as Readonly<T>;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	if (typeof value !== 'object' || value === null) return false;
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
+}
+
+function normalizeErrorResult(result: unknown): string | Record<string, any> {
+	if (typeof result === 'string' || isPlainObject(result)) return result;
+	return JSON.stringify(result) ?? String(result);
+}
+
+async function decodeResponse(response: Response) {
+	const contentType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase();
+	if (response.status < 300 && contentType && !contentType.startsWith('text/') && !isJsonContentType(contentType)) {
+		return response.arrayBuffer();
+	}
+	const text = await response.text();
+	if (!text.length) return undefined;
+	return isJsonContentType(contentType) ? JSON.parse(text) : text;
+}
+
+function isJsonContentType(contentType: string | undefined) {
+	return contentType === 'application/json' || contentType?.endsWith('+json') === true;
+}
+
+function majorParameter(url: string) {
+	const channel = url.match(/^\/channels\/([^/]+)/)?.[1];
+	if (channel) return `channels:${channel}`;
+	const guild = url.match(/^\/guilds\/([^/]+)/)?.[1];
+	if (guild) return `guilds:${guild}`;
+	const webhook = url.match(/^\/webhooks\/([^/]+)(?:\/([^/?]+))?/)?.slice(1);
+	if (webhook?.[0]) return `webhooks:${webhook.filter(Boolean).join(':')}`;
+	return '';
+}

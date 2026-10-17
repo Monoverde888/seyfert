@@ -1,13 +1,13 @@
-import type { APIGuildMember } from 'discord-api-types/v10';
-import type { ReturnCache } from '../..';
-import { fakePromise } from '../../common';
-import { GuildMember } from '../../structures';
+import type { CacheFrom, ReturnCache } from '../..';
+import { type GuildMemberStructure, Transformers } from '../../client/transformers';
+import { fakePromise } from '../../common/it/fake-promise';
+import type { APIGuildMember, APIUser } from '../../types';
 import { GuildBasedResource } from './default/guild-based';
-export class Members extends GuildBasedResource {
+export class Members extends GuildBasedResource<any, APIGuildMember> {
 	namespace = 'member';
 
 	//@ts-expect-error
-	filter(data: APIGuildMember, id: string, guild_id: string) {
+	filter(data: APIGuildMember, id: string, guild_id: string, from: CacheFrom) {
 		return true;
 	}
 
@@ -16,52 +16,85 @@ export class Members extends GuildBasedResource {
 		return rest;
 	}
 
-	override get(id: string, guild: string): ReturnCache<GuildMember | undefined> {
+	override get(id: string, guild: string): ReturnCache<GuildMemberStructure | undefined> {
 		return fakePromise(super.get(id, guild)).then(rawMember =>
-			fakePromise(this.client.cache.users?.get(id)).then(user =>
-				rawMember && user ? new GuildMember(this.client, rawMember, user, guild) : undefined,
+			fakePromise(this.client.cache.users?.raw(id)).then(user =>
+				rawMember && user ? Transformers.GuildMember(this.client, rawMember, user, guild) : undefined,
 			),
 		);
 	}
 
-	override bulk(ids: string[], guild: string): ReturnCache<GuildMember[]> {
+	raw(id: string, guild: string): ReturnCache<APIGuildMember | undefined> {
+		return fakePromise(super.get(id, guild) as Omit<APIGuildMember, 'user'>).then(rawMember => {
+			return fakePromise(this.client.cache.users?.raw(id)).then(user =>
+				rawMember && user
+					? {
+							...rawMember,
+							user,
+						}
+					: undefined,
+			);
+		});
+	}
+
+	override bulk(ids: string[], guild: string): ReturnCache<GuildMemberStructure[]> {
 		return fakePromise(super.bulk(ids, guild)).then(members =>
-			fakePromise(this.client.cache.users?.bulk(ids)).then(
-				users =>
-					members
-						.map(rawMember => {
-							const user = users?.find(x => x.id === rawMember.id);
-							return user ? new GuildMember(this.client, rawMember, user, guild) : undefined;
-						})
-						.filter(Boolean) as GuildMember[],
-			),
+			fakePromise(this.client.cache.users?.bulkRaw(ids)).then(users => {
+				if (!users) return [];
+				let usersRecord: null | Partial<Record<string, APIUser>> = {};
+				for (const user of users) {
+					usersRecord[user.id] = user;
+				}
+				const result = members
+					.map(rawMember => {
+						const user = usersRecord![rawMember.id];
+						return user ? Transformers.GuildMember(this.client, rawMember, user, guild) : undefined;
+					})
+					.filter(x => x !== undefined);
+				usersRecord = null;
+				return result;
+			}),
 		);
 	}
 
-	override values(guild: string): ReturnCache<GuildMember[]> {
+	bulkRaw(ids: string[], guild: string): ReturnCache<Omit<APIGuildMember, 'user'>[]> {
+		return super.bulk(ids, guild);
+	}
+
+	override values(guild: '*' | (string & {})): ReturnCache<GuildMemberStructure[]> {
 		return fakePromise(super.values(guild)).then(members =>
-			fakePromise(this.client.cache.users?.values()).then(
-				users =>
-					members
-						.map(rawMember => {
-							const user = users?.find(x => x.id === rawMember.id);
-							return user ? new GuildMember(this.client, rawMember, user, rawMember.guild_id) : undefined;
-						})
-						.filter(Boolean) as GuildMember[],
-			),
+			fakePromise(this.client.cache.users?.bulkRaw(members.map(member => member.id))).then(users => {
+				if (!users) return [];
+				let usersRecord: null | Partial<Record<string, APIUser>> = {};
+				for (const user of users) {
+					usersRecord[user.id] = user;
+				}
+				const result = members
+					.map(rawMember => {
+						const user = usersRecord![rawMember.id];
+						return user ? Transformers.GuildMember(this.client, rawMember, user, rawMember.guild_id) : undefined;
+					})
+					.filter(x => x !== undefined);
+				usersRecord = null;
+				return result;
+			}),
 		);
 	}
 
-	override async set(memberId: string, guildId: string, data: any): Promise<void>;
-	override async set(memberId_dataArray: [string, any][], guildId: string): Promise<void>;
-	override async set(__keys: string | [string, any][], guild: string, data?: any) {
+	valuesRaw(guild: string): ReturnCache<Omit<APIGuildMember, 'user'>[]> {
+		return super.values(guild);
+	}
+
+	override async set(from: CacheFrom, memberId: string, guildId: string, data: any): Promise<void>;
+	override async set(from: CacheFrom, memberId_dataArray: [string, any][], guildId: string): Promise<void>;
+	override async set(from: CacheFrom, __keys: string | [string, any][], guild: string, data?: any) {
 		const keys: [string, any][] = Array.isArray(__keys) ? __keys : [[__keys, data]];
-		const bulkData: (['members', any, string, string] | ['users', any, string])[] = [];
+		const bulkData: ([typeof from, 'members', any, string, string] | [typeof from, 'users', any, string])[] = [];
 
 		for (const [id, value] of keys) {
 			if (value.user) {
-				bulkData.push(['members', value, id, guild]);
-				bulkData.push(['users', value.user, id]);
+				bulkData.push([from, 'members', value, id, guild]);
+				bulkData.push([from, 'users', value.user, id]);
 			}
 		}
 

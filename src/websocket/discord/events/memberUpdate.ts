@@ -1,4 +1,4 @@
-import type { APIUser, GatewayGuildMemberUpdateDispatchData } from 'discord-api-types/v10';
+import type { APIUser, GatewayGuildMemberUpdateDispatchData } from '../../../types';
 
 export class MemberUpdateHandler {
 	guildMemberUpdate = new Map<string, { timeout: NodeJS.Timeout; member: GatewayGuildMemberUpdateDispatchData }>();
@@ -11,8 +11,8 @@ export class MemberUpdateHandler {
 
 		const data = this.guildMemberUpdate.get(member.user.id)!;
 
-		if (this.usersEqual(data.member.user, member.user)) {
-			return this.membersEquals(data.member, member);
+		if (this.usersEqual(data.member.user, member.user) && this.membersEquals(data.member, member)) {
+			return false;
 		}
 
 		clearTimeout(data.timeout);
@@ -33,6 +33,7 @@ export class MemberUpdateHandler {
 
 	membersEquals(old: GatewayGuildMemberUpdateDispatchData, member: GatewayGuildMemberUpdateDispatchData) {
 		return (
+			old.guild_id === member.guild_id &&
 			old.joined_at === member.joined_at &&
 			old.nick === member.nick &&
 			old.avatar === member.avatar &&

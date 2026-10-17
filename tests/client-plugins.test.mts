@@ -1,0 +1,232 @@
+import { describe, expect, test } from 'vitest';
+import { createPlugin, GatewayIntentBits } from '../src';
+import { Client, type ClientOptions } from '../src/client/client';
+import {
+	type AnySeyfertPlugin,
+	resolveClientPlugins,
+	runContextScopes,
+	type SeyfertPlugin,
+} from '../src/client/plugins';
+
+function runtimeConfig() {
+	return {
+		token: 'header.payload.signature',
+		locations: { base: process.cwd() },
+	};
+}
+
+function createClient<const TPlugins extends readonly AnySeyfertPlugin[] = readonly []>(
+	options: ClientOptions<TPlugins> = {},
+) {
+	return new Client({
+		getRC: async () => runtimeConfig(),
+		...options,
+	} as ClientOptions);
+}
+
+class RecordingClient extends Client {
+	executeOptions?: { token?: string; intents?: number };
+
+	protected async execute(options: { token?: string; intents?: number } = {}) {
+		this.executeOptions = options;
+	}
+
+	async loadEvents() {}
+}
+
+function createRecordingClient<const TPlugins extends readonly AnySeyfertPlugin[] = readonly []>(
+	options: ClientOptions<TPlugins> = {},
+) {
+	const client = new RecordingClient({
+		getRC: async () => ({ ...runtimeConfig(), intents: 0 }),
+		...options,
+	} as ClientOptions);
+	(client as unknown as { gateway: unknown }).gateway = {};
+	return client;
+}
+
+describe('client plugins', () => {
+	test('passes normalized start option intents to execute', async () => {
+		const plugin = createPlugin({
+			name: 'execute-intents',
+			register(api) {
+				api.gateway.addIntents('GuildMembers');
+			},
+		});
+		const client = createRecordingClient({ plugins: [plugin] });
+
+		await client.start({ connection: { intents: ['Guilds'] } });
+
+		expect(client.executeOptions?.intents).toBe(GatewayIntentBits.Guilds | GatewayIntentBits.GuildMembers);
+	});
+
+	test('preserves base context and global middlewares before plugin and user options', () => {
+		const plugin: SeyfertPlugin = {
+			name: 'plugin',
+			options: () => ({
+				context: () => ({ fromPlugin: true, shared: 'plugin' }),
+				globalMiddlewares: ['plugin' as never],
+			}),
+		};
+
+		const { options } = resolveClientPlugins(
+			{
+				context: () => ({ fromBase: true, shared: 'base' }),
+				globalMiddlewares: ['base' as never],
+			},
+			{
+				plugins: [plugin],
+				context: () => ({ fromUser: true, shared: 'user' }),
+				globalMiddlewares: ['user' as never],
+			},
+		);
+
+		expect(options.context?.({} as never)).toEqual({
+			fromBase: true,
+			fromPlugin: true,
+			fromUser: true,
+			shared: 'user',
+		});
+		expect(options.globalMiddlewares).toEqual(['base', 'plugin', 'user']);
+	});
+
+	test('composes context scopes in plugin order before user scopes', async () => {
+		const calls: string[] = [];
+		const pluginA: SeyfertPlugin = {
+			name: 'plugin-a',
+			options: () => ({
+				contextScopes: [
+					async (_context, run) => {
+						calls.push('plugin-a before');
+						const result = await run();
+						calls.push('plugin-a after');
+						return result;
+					},
+				],
+			}),
+		};
+		const pluginB: SeyfertPlugin = {
+			name: 'plugin-b',
+			options: () => ({
+				contextScopes: [
+					async (_context, run) => {
+						calls.push('plugin-b before');
+						const result = await run();
+						calls.push('plugin-b after');
+						return result;
+					},
+				],
+			}),
+		};
+		const client = createClient({
+			plugins: [pluginA, pluginB],
+			contextScopes: [
+				async (_context, run) => {
+					calls.push('user before');
+					const result = await run();
+					calls.push('user after');
+					return result;
+				},
+			],
+		});
+
+		const result = await runContextScopes(client.options.contextScopes, {} as never, async () => {
+			calls.push('handler');
+			return 'done';
+		});
+
+		expect(result).toBe('done');
+		expect(calls).toEqual([
+			'plugin-a before',
+			'plugin-b before',
+			'user before',
+			'handler',
+			'user after',
+			'plugin-b after',
+			'plugin-a after',
+		]);
+	});
+
+	test('runs setup before cache start and command loading', async () => {
+		const calls: string[] = [];
+		const plugin: SeyfertPlugin = {
+			name: 'plugin',
+			setup: () => {
+				calls.push('plugin');
+			},
+		};
+		const client = createClient({ plugins: [plugin] });
+
+		(client as unknown as { gateway: unknown }).gateway = {};
+		client.cache.adapter.start = async () => {
+			calls.push('cache');
+		};
+		client.loadLangs = async () => {
+			calls.push('langs');
+		};
+		client.loadCommands = async () => {
+			calls.push('commands');
+		};
+		client.loadComponents = async () => {
+			calls.push('components');
+		};
+
+		await client.start({ token: 'header.payload.signature' }, false);
+
+		expect(calls).toEqual(['plugin', 'cache', 'langs', 'commands', 'components']);
+	});
+
+	test('shares setup work across concurrent starts', async () => {
+		const calls: string[] = [];
+		let releaseSetup = () => {};
+		const holdSetup = new Promise<void>(resolve => {
+			releaseSetup = resolve;
+		});
+		const plugin: SeyfertPlugin = {
+			name: 'plugin',
+			setup: async () => {
+				calls.push('plugin');
+				await holdSetup;
+			},
+		};
+		const client = createClient({ plugins: [plugin] });
+
+		(client as unknown as { gateway: unknown }).gateway = {};
+
+		const starts = [
+			client.start({ token: 'header.payload.signature' }, false),
+			client.start({ token: 'header.payload.signature' }, false),
+		];
+
+		try {
+			await new Promise(resolve => setTimeout(resolve, 0));
+			expect(calls).toEqual(['plugin']);
+		} finally {
+			releaseSetup();
+			await Promise.allSettled(starts);
+		}
+
+		expect(calls).toEqual(['plugin']);
+	});
+
+	test('retries setup after plugin setup fails', async () => {
+		const calls: string[] = [];
+		const plugin: SeyfertPlugin = {
+			name: 'plugin',
+			setup: () => {
+				calls.push('plugin');
+				if (calls.length === 1) throw new Error('setup failed');
+			},
+		};
+		const client = createClient({ plugins: [plugin] });
+
+		(client as unknown as { gateway: unknown }).gateway = {};
+
+		await expect(client.start({ token: 'header.payload.signature' }, false)).rejects.toThrow(
+			/plugin.*setup|setup.*plugin/,
+		);
+		await expect(client.start({ token: 'header.payload.signature' }, false)).resolves.toBeUndefined();
+
+		expect(calls).toEqual(['plugin', 'plugin']);
+	});
+});

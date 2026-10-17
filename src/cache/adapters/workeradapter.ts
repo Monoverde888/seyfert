@@ -1,21 +1,28 @@
 import { randomUUID } from 'node:crypto';
+import { lazyLoadPackage, SeyfertError } from '../../common';
 import type { WorkerData } from '../../websocket';
 import type { WorkerSendCacheRequest } from '../../websocket/discord/worker';
-import type { Adapter } from './types';
-import { lazyLoadPackage } from '../../common';
+import type { Adapter, AdapterEntry, AdapterRelationship } from './types';
 
 let parentPort: import('node:worker_threads').MessagePort;
 
 export class WorkerAdapter implements Adapter {
 	isAsync = true;
-	promises = new Map<string, { resolve: (value: unknown) => void; timeout: NodeJS.Timeout }>();
+	promises = new Map<
+		string,
+		{ resolve: (value: unknown) => void; reject: (error: unknown) => void; timeout: NodeJS.Timeout }
+	>();
 
 	constructor(public workerData: WorkerData) {
 		const worker_threads = lazyLoadPackage<typeof import('node:worker_threads')>('node:worker_threads');
 		if (worker_threads?.parentPort) parentPort = worker_threads.parentPort;
 	}
 
-	postMessage(body: any) {
+	start() {
+		//
+	}
+
+	postMessage(body: any): unknown {
 		if (parentPort) return parentPort.postMessage(body);
 		return process.send!(body);
 	}
@@ -24,20 +31,33 @@ export class WorkerAdapter implements Adapter {
 		const nonce = randomUUID();
 		if (this.promises.has(nonce)) return this.send(method, ...args);
 
-		this.postMessage({
-			type: 'CACHE_REQUEST',
-			args,
-			nonce,
-			method,
-			workerId: this.workerData.workerId,
-		} satisfies WorkerSendCacheRequest);
-
 		return new Promise<any>((res, rej) => {
 			const timeout = setTimeout(() => {
 				this.promises.delete(nonce);
-				rej(new Error('Timeout cache request'));
+				rej(new SeyfertError('CACHE_TIMEOUT', { metadata: { ...{ nonce, method }, detail: 'Timeout cache request' } }));
 			}, 60e3);
-			this.promises.set(nonce, { resolve: res, timeout });
+			const pending = { resolve: res, reject: rej, timeout };
+			const rejectPending = (error: unknown) => {
+				if (this.promises.get(nonce) !== pending) return;
+				clearTimeout(timeout);
+				this.promises.delete(nonce);
+				rej(error);
+			};
+			this.promises.set(nonce, pending);
+			try {
+				const dispatched = this.postMessage({
+					type: 'CACHE_REQUEST',
+					args,
+					nonce,
+					method,
+					workerId: this.workerData.workerId,
+				} satisfies WorkerSendCacheRequest);
+				if (dispatched && (typeof dispatched === 'object' || typeof dispatched === 'function')) {
+					void Promise.resolve(dispatched).catch(rejectPending);
+				}
+			} catch (error) {
+				rejectPending(error);
+			}
 		});
 	}
 
@@ -45,16 +65,28 @@ export class WorkerAdapter implements Adapter {
 		return this.send('scan', ...rest);
 	}
 
+	bulkGet(...rest: any[]) {
+		return this.send('bulkGet', ...rest);
+	}
+
 	get(...rest: any[]) {
 		return this.send('get', ...rest);
 	}
 
-	set(...rest: any[]) {
-		return this.send('set', ...rest);
+	bulkSet(entries: AdapterEntry[]) {
+		return this.send('bulkSet', entries);
 	}
 
-	patch(...rest: any[]) {
-		return this.send('patch', ...rest);
+	set(key: string, value: any, relationship: AdapterRelationship) {
+		return this.send('set', key, value, relationship);
+	}
+
+	bulkPatch(entries: AdapterEntry[]) {
+		return this.send('bulkPatch', entries);
+	}
+
+	patch(key: string, value: any, relationship: AdapterRelationship) {
+		return this.send('patch', key, value, relationship);
 	}
 
 	values(...rest: any[]) {
@@ -67,6 +99,10 @@ export class WorkerAdapter implements Adapter {
 
 	count(...rest: any[]) {
 		return this.send('count', ...rest);
+	}
+
+	bulkRemove(...rest: any[]) {
+		return this.send('bulkRemove', ...rest);
 	}
 
 	remove(...rest: any[]) {
@@ -83,14 +119,6 @@ export class WorkerAdapter implements Adapter {
 
 	getToRelationship(...rest: any[]) {
 		return this.send('getToRelationship', ...rest);
-	}
-
-	bulkAddToRelationShip(...rest: any[]) {
-		return this.send('bulkAddToRelationShip', ...rest);
-	}
-
-	addToRelationship(...rest: any[]) {
-		return this.send('addToRelationship', ...rest);
 	}
 
 	removeToRelationship(...rest: any[]) {

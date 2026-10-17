@@ -1,15 +1,21 @@
-import {
-	PermissionFlagsBits,
-	type RESTGetAPIChannelMessagesQuery,
-	type RESTPatchAPIChannelJSONBody,
-	type RESTPostAPIChannelThreadsJSONBody,
-	type RESTPostAPIGuildForumThreadsJSONBody,
-} from 'discord-api-types/v10';
-import { BaseChannel, Message, type GuildMember, type GuildRole } from '../../structures';
-import channelFrom, { type AllChannels } from '../../structures/channels';
+import { CacheFrom } from '../../cache';
+import type { Overwrites } from '../../cache/resources/overwrites';
+import { type MessageStructure, type ThreadChannelStructure, Transformers } from '../../client/transformers';
+import { type AllChannels, BaseChannel, channelFrom, type GuildMember, type GuildRole } from '../../structures';
 import { PermissionsBitField } from '../../structures/extra/Permissions';
-import { BaseShorter } from './base';
+import type {
+	APIChannel,
+	APIOverwrite,
+	RESTGetAPIChannelMessagesPinsQuery,
+	RESTGetAPIChannelMessagesQuery,
+	RESTPatchAPIChannelJSONBody,
+	RESTPutAPIChannelPermissionJSONBody,
+} from '../../types';
+import { PermissionFlagsBits } from '../../types';
 import { MergeOptions } from '../it/utils';
+import type { MakeRequired, OmitInsert, PermissionStrings } from '../types/util';
+import type { ThreadCreateBodyRequest } from '../types/write';
+import { BaseShorter } from './base';
 
 export class ChannelShorter extends BaseShorter {
 	/**
@@ -19,15 +25,31 @@ export class ChannelShorter extends BaseShorter {
 	 * @returns A Promise that resolves to the fetched channel.
 	 */
 	async fetch(id: string, force?: boolean): Promise<AllChannels> {
-		let channel;
+		return channelFrom(await this.raw(id, force), this.client);
+	}
+
+	async raw(id: string, force?: boolean): Promise<APIChannel> {
 		if (!force) {
-			channel = await this.client.cache.channels?.get(id);
-			if (channel) return channel;
+			const channel = await this.client.cache.channels?.raw(id);
+			if (channel) {
+				const overwrites = await this.client.cache.overwrites?.raw(id);
+				return overwrites
+					? ({ ...channel, permission_overwrites: overwrites } as unknown as APIChannel)
+					: (channel as APIChannel);
+			}
 		}
 
-		channel = await this.client.proxy.channels(id).get();
-		await this.client.cache.channels?.patch(id, undefined, channel);
-		return channelFrom(channel, this.client);
+		const channel = await this.client.proxy.channels(id).get();
+		await this.client.cache.channels?.patch(
+			CacheFrom.Rest,
+			id,
+			'guild_id' in channel && channel.guild_id ? channel.guild_id : '@me',
+			channel,
+		);
+		if ('permission_overwrites' in channel && channel.permission_overwrites && channel.guild_id) {
+			await this.client.cache.overwrites?.set(CacheFrom.Rest, id, channel.guild_id, channel.permission_overwrites);
+		}
+		return channel as APIChannel;
 	}
 
 	/**
@@ -37,9 +59,9 @@ export class ChannelShorter extends BaseShorter {
 	 * @returns A Promise that resolves to the deleted channel.
 	 */
 	async delete(id: string, optional: ChannelShorterOptionalParams = { guildId: '@me' }): Promise<AllChannels> {
-		const options = MergeOptions<ChannelShorterOptionalParams>({ guildId: '@me' }, optional);
+		const options = MergeOptions<MakeRequired<ChannelShorterOptionalParams, 'guildId'>>({ guildId: '@me' }, optional);
 		const res = await this.client.proxy.channels(id).delete({ reason: options.reason });
-		await this.client.cache.channels?.removeIfNI(BaseChannel.__intent__(options.guildId!), res.id, options.guildId!);
+		await this.client.cache.channels?.removeIfNI(BaseChannel.__intent__(options.guildId), res.id, options.guildId);
 		return channelFrom(res, this.client);
 	}
 
@@ -53,19 +75,103 @@ export class ChannelShorter extends BaseShorter {
 	async edit(
 		id: string,
 		body: RESTPatchAPIChannelJSONBody,
-		optional: ChannelShorterOptionalParams = { guildId: '@me' },
+		optional: ChannelShorterOptionalParams = {},
 	): Promise<AllChannels> {
-		const options = MergeOptions<ChannelShorterOptionalParams>({ guildId: '@me' }, optional);
-		const res = await this.client.proxy.channels(id).patch({ body, reason: options.reason });
-		await this.client.cache.channels?.setIfNI(BaseChannel.__intent__(options.guildId!), res.id, options.guildId!, res);
-		if (body.permission_overwrites && 'permission_overwrites' in res)
+		const res = await this.client.proxy.channels(id).patch({ body, reason: optional.reason });
+		const guildId = 'guild_id' in res && res.guild_id ? res.guild_id : '@me';
+		await this.client.cache.channels?.setIfNI(CacheFrom.Rest, BaseChannel.__intent__(guildId), res.id, guildId, res);
+		if (body.permission_overwrites && 'permission_overwrites' in res && res.permission_overwrites)
 			await this.client.cache.overwrites?.setIfNI(
-				BaseChannel.__intent__(options.guildId!),
+				CacheFrom.Rest,
+				BaseChannel.__intent__(guildId),
 				res.id,
-				options.guildId!,
+				guildId,
 				res.permission_overwrites,
 			);
 		return channelFrom(res, this.client);
+	}
+
+	/**
+	 * Edits or creates a permission overwrite for a channel.
+	 * @param channelId The ID of the channel.
+	 * @param overwriteId The ID of the role or member overwrite.
+	 * @param body The overwrite payload.
+	 * @param optional Optional parameters including guild id and reason.
+	 */
+	async editOverwrite(
+		channelId: string,
+		overwriteId: string,
+		raw: ChannelShorterOverwriteBody,
+		optional: ChannelShorterOptionalParams = { guildId: '@me' },
+	) {
+		const body = {
+			...raw,
+			allow: raw.allow ? PermissionsBitField.resolve(raw.allow).toString() : '0',
+			deny: raw.deny ? PermissionsBitField.resolve(raw.deny).toString() : '0',
+		};
+		const options = MergeOptions<MakeRequired<ChannelShorterOptionalParams, 'guildId'>>({ guildId: '@me' }, optional);
+		await this.client.proxy.channels(channelId).permissions(overwriteId).put({
+			body,
+			reason: options.reason,
+		});
+
+		if (options.guildId === '@me') return;
+
+		const overwrite: APIOverwrite = {
+			allow: body.allow,
+			deny: body.deny,
+			id: overwriteId,
+			type: body.type,
+		};
+		const cachedOverwrites = (await this.client.cache.overwrites?.raw(channelId)) ?? [];
+		const updatedOverwrites = [...cachedOverwrites.filter(current => current.id !== overwriteId), overwrite];
+
+		await this.client.cache.overwrites?.setIfNI(
+			CacheFrom.Rest,
+			BaseChannel.__intent__(options.guildId),
+			channelId,
+			options.guildId,
+			updatedOverwrites,
+		);
+	}
+
+	/**
+	 * Deletes a permission overwrite from a channel.
+	 * @param channelId The ID of the channel.
+	 * @param overwriteId The ID of the role or member overwrite.
+	 * @param optional Optional parameters including guild id and reason.
+	 */
+	async deleteOverwrite(
+		channelId: string,
+		overwriteId: string,
+		optional: ChannelShorterOptionalParams = { guildId: '@me' },
+	) {
+		const options = MergeOptions<MakeRequired<ChannelShorterOptionalParams, 'guildId'>>({ guildId: '@me' }, optional);
+		await this.client.proxy.channels(channelId).permissions(overwriteId).delete({ reason: options.reason });
+
+		if (options.guildId === '@me') return;
+
+		const cachedOverwrites = await this.client.cache.overwrites?.raw(channelId);
+		if (!cachedOverwrites) return;
+
+		const updatedOverwrites = cachedOverwrites.filter(current => current.id !== overwriteId);
+
+		if (!updatedOverwrites.length) {
+			await this.client.cache.overwrites?.removeIfNI(
+				BaseChannel.__intent__(options.guildId),
+				channelId,
+				options.guildId,
+			);
+			return;
+		}
+
+		await this.client.cache.overwrites?.setIfNI(
+			CacheFrom.Rest,
+			BaseChannel.__intent__(options.guildId),
+			channelId,
+			options.guildId,
+			updatedOverwrites,
+		);
 	}
 
 	/**
@@ -73,19 +179,29 @@ export class ChannelShorter extends BaseShorter {
 	 * @param id The ID of the channel.
 	 * @returns A Promise that resolves when the typing indicator is successfully sent.
 	 */
-	async typing(id: string): Promise<void> {
-		await this.client.proxy.channels(id).typing.post();
+	typing(id: string): Promise<void> {
+		return this.client.proxy.channels(id).typing.post();
 	}
 
-	async pins(channelId: string): Promise<Message[]> {
-		const messages = await this.client.proxy.channels(channelId).pins.get();
+	async pins(
+		channelId: string,
+		query?: RESTGetAPIChannelMessagesPinsQuery,
+	): Promise<{ hasMore: boolean; items: { pinnedAt: number; message: MessageStructure }[] }> {
+		const pins = await this.client.proxy.channels(channelId).messages.pins.get({ query });
 		await this.client.cache.messages?.patch(
-			messages.map(x => {
-				return [x.id, x];
+			CacheFrom.Rest,
+			pins.items.map(x => {
+				return [x.message.id, x.message];
 			}) satisfies [string, any][],
 			channelId,
 		);
-		return messages.map(message => new Message(this.client, message));
+		return {
+			hasMore: pins.has_more,
+			items: pins.items.map(x => ({
+				pinnedAt: Date.parse(x.pinned_at),
+				message: Transformers.Message(this.client, x.message),
+			})),
+		};
 	}
 
 	/**
@@ -96,7 +212,7 @@ export class ChannelShorter extends BaseShorter {
 	 * @returns A Promise that resolves when the message is successfully pinned.
 	 */
 	setPin(messageId: string, channelId: string, reason?: string) {
-		return this.client.proxy.channels(channelId).pins(messageId).put({ reason });
+		return this.client.proxy.channels(channelId).messages.pins(messageId).put({ reason });
 	}
 
 	/**
@@ -107,7 +223,7 @@ export class ChannelShorter extends BaseShorter {
 	 * @returns A Promise that resolves when the message is successfully unpinned.
 	 */
 	deletePin(messageId: string, channelId: string, reason?: string) {
-		return this.client.proxy.channels(channelId).pins(messageId).delete({ reason });
+		return this.client.proxy.channels(channelId).messages.pins(messageId).delete({ reason });
 	}
 
 	/**
@@ -116,37 +232,33 @@ export class ChannelShorter extends BaseShorter {
 	 * @param reason The reason for unpinning the message.
 	 * @returns A promise that resolves when the thread is succesfully created.
 	 */
-	async thread(
-		channelId: string,
-		body: RESTPostAPIChannelThreadsJSONBody | RESTPostAPIGuildForumThreadsJSONBody,
-		reason?: string,
-	) {
+	async thread(channelId: string, body: ThreadCreateBodyRequest, reason?: string): Promise<ThreadChannelStructure> {
 		return this.client.threads.create(channelId, body, reason);
 	}
 
 	async memberPermissions(channelId: string, member: GuildMember, checkAdmin = true): Promise<PermissionsBitField> {
 		const memberPermissions = await member.fetchPermissions();
 
-		if (checkAdmin && memberPermissions.has(PermissionFlagsBits.Administrator)) {
+		if (checkAdmin && memberPermissions.has([PermissionFlagsBits.Administrator])) {
 			return new PermissionsBitField(PermissionsBitField.All);
 		}
 
 		const overwrites = await this.overwritesFor(channelId, member);
 		const permissions = new PermissionsBitField(memberPermissions.bits);
 
-		permissions.remove(overwrites.everyone?.deny.bits ?? 0n);
-		permissions.add(overwrites.everyone?.allow.bits ?? 0n);
-		permissions.remove(overwrites.roles.length > 0 ? overwrites.roles.map(role => role.deny.bits) : 0n);
-		permissions.add(overwrites.roles.length > 0 ? overwrites.roles.map(role => role.allow.bits) : 0n);
-		permissions.remove(overwrites.member?.deny.bits ?? 0n);
-		permissions.add(overwrites.member?.allow.bits ?? 0n);
+		permissions.remove([overwrites.everyone?.deny.bits ?? 0n]);
+		permissions.add([overwrites.everyone?.allow.bits ?? 0n]);
+		permissions.remove(overwrites.roles.length > 0 ? overwrites.roles.map(role => role.deny.bits) : [0n]);
+		permissions.add(overwrites.roles.length > 0 ? overwrites.roles.map(role => role.allow.bits) : [0n]);
+		permissions.remove([overwrites.member?.deny.bits ?? 0n]);
+		permissions.add([overwrites.member?.allow.bits ?? 0n]);
 		return permissions;
 	}
 
 	async overwritesFor(channelId: string, member: GuildMember) {
-		const roleOverwrites = [];
-		let memberOverwrites;
-		let everyoneOverwrites;
+		const roleOverwrites: ReturnType<Overwrites['get']> = [];
+		let memberOverwrites: NonNullable<ReturnType<Overwrites['get']>>[number] | undefined;
+		let everyoneOverwrites: NonNullable<ReturnType<Overwrites['get']>>[number] | undefined;
 
 		const channelOverwrites = (await this.client.cache.overwrites?.get(channelId)) ?? [];
 
@@ -168,33 +280,34 @@ export class ChannelShorter extends BaseShorter {
 	}
 
 	async rolePermissions(channelId: string, role: GuildRole, checkAdmin = true): Promise<PermissionsBitField> {
-		if (checkAdmin && role.permissions.has(PermissionFlagsBits.Administrator)) {
+		if (checkAdmin && role.permissions.has([PermissionFlagsBits.Administrator])) {
 			return new PermissionsBitField(PermissionsBitField.All);
 		}
-		const channelOverwrites = (await this.client.cache.overwrites?.get(channelId)) ?? [];
-
+		const permissions = new PermissionsBitField(role.permissions.bits);
+		const channelOverwrites = await this.client.cache.overwrites?.get(channelId);
+		if (!channelOverwrites) return permissions;
 		const everyoneOverwrites = channelOverwrites.find(x => x.id === role.guildId);
 		const roleOverwrites = channelOverwrites.find(x => x.id === role.id);
-		const permissions = new PermissionsBitField(role.permissions.bits);
 
-		permissions.remove(everyoneOverwrites?.deny.bits ?? 0n);
-		permissions.add(everyoneOverwrites?.allow.bits ?? 0n);
-		permissions.remove(roleOverwrites?.deny.bits ?? 0n);
-		permissions.add(roleOverwrites?.allow.bits ?? 0n);
+		permissions.remove([everyoneOverwrites?.deny.bits ?? 0n]);
+		permissions.add([everyoneOverwrites?.allow.bits ?? 0n]);
+		permissions.remove([roleOverwrites?.deny.bits ?? 0n]);
+		permissions.add([roleOverwrites?.allow.bits ?? 0n]);
 		return permissions;
 	}
 
-	async fetchMessages(channelId: string, query?: RESTGetAPIChannelMessagesQuery) {
+	async fetchMessages(channelId: string, query?: RESTGetAPIChannelMessagesQuery): Promise<MessageStructure[]> {
 		const result = await this.client.proxy.channels(channelId).messages.get({
 			query,
 		});
 		await this.client.cache.messages?.patch(
+			CacheFrom.Rest,
 			result.map(x => {
 				return [x.id, x];
 			}) satisfies [string, any][],
 			channelId,
 		);
-		return result.map(message => new Message(this.client, message));
+		return result.map(message => Transformers.Message(this.client, message));
 	}
 
 	setVoiceStatus(channelId: string, status: string | null = null) {
@@ -202,4 +315,12 @@ export class ChannelShorter extends BaseShorter {
 	}
 }
 
-export type ChannelShorterOptionalParams = Partial<{ guildId: string; reason: string }>;
+export type ChannelShorterOptionalParams = Partial<{ guildId: (string & {}) | '@me'; reason: string }>;
+export type ChannelShorterOverwriteBody = OmitInsert<
+	RESTPutAPIChannelPermissionJSONBody,
+	'allow' | 'deny',
+	{
+		allow?: PermissionStrings;
+		deny?: PermissionStrings;
+	}
+>;

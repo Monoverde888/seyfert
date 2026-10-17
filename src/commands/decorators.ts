@@ -1,46 +1,51 @@
+import type { RegisteredPluginMiddlewares, SeyfertRegistry } from '../client/plugins';
+import type { FlatObjectKeys, PermissionStrings } from '../common';
+import { PermissionsBitField } from '../structures/extra/Permissions';
 import {
 	ApplicationCommandType,
 	ApplicationIntegrationType,
+	type EntryPointCommandHandlerType,
 	InteractionContextType,
-	PermissionFlagsBits,
 	type LocaleString,
-} from 'discord-api-types/v10';
-import type { FlatObjectKeys, PermissionStrings } from '../common';
+} from '../types';
 import type { CommandOption, OptionsRecord, SubCommand } from './applications/chat';
-import type { DefaultLocale, ExtraProps, IgnoreCommand, MiddlewareContext } from './applications/shared';
+import type { AnyMiddlewareContext, DefaultLocale, ExtraProps, IgnoreCommand } from './applications/shared';
 
-export interface RegisteredMiddlewares {}
+export type RegisteredMiddlewares = SeyfertRegistry extends {
+	middlewares: infer M extends Record<string, AnyMiddlewareContext>;
+}
+	? M
+	: {};
+// Contexts without metadata defer the registry lookup; the open key set also preserves generic key constraints.
+export type ResolvedRegisteredMiddlewares<M = unknown> = [M] extends [never]
+	? Record<PropertyKey, never>
+	: RegisteredMiddlewares & RegisteredPluginMiddlewares;
+type MiddlewareKey = keyof ResolvedRegisteredMiddlewares;
 
-type DeclareOptions =
-	| {
-			name: string;
-			description: string;
-			botPermissions?: PermissionStrings | bigint;
-			defaultMemberPermissions?: PermissionStrings | bigint;
-			guildId?: string[];
-			nsfw?: boolean;
-			integrationTypes?: (keyof typeof ApplicationIntegrationType)[];
-			contexts?: (keyof typeof InteractionContextType)[];
-			ignore?: IgnoreCommand;
-			aliases?: string[];
-			props?: ExtraProps;
-	  }
-	| (Omit<
-			{
-				name: string;
-				description: string;
-				botPermissions?: PermissionStrings | bigint;
-				defaultMemberPermissions?: PermissionStrings | bigint;
-				guildId?: string[];
-				nsfw?: boolean;
-				integrationTypes?: (keyof typeof ApplicationIntegrationType)[];
-				contexts?: (keyof typeof InteractionContextType)[];
-				props?: ExtraProps;
-			},
-			'type' | 'description'
-	  > & {
+export type InferMiddlewares<T extends readonly MiddlewareKey[]> = T[number];
+
+export type CommandDeclareOptions =
+	| DecoratorDeclareOptions
+	| (Omit<DecoratorDeclareOptions, 'description'> & {
 			type: ApplicationCommandType.User | ApplicationCommandType.Message;
+	  })
+	| (Omit<DecoratorDeclareOptions, 'ignore' | 'aliases' | 'guildId'> & {
+			type: ApplicationCommandType.PrimaryEntryPoint;
+			handler: EntryPointCommandHandlerType;
 	  });
+export interface DecoratorDeclareOptions {
+	name: string;
+	description: string;
+	botPermissions?: PermissionStrings;
+	defaultMemberPermissions?: PermissionStrings;
+	guildId?: readonly string[];
+	nsfw?: boolean;
+	integrationTypes?: (keyof typeof ApplicationIntegrationType)[] | ApplicationIntegrationType[];
+	contexts?: (keyof typeof InteractionContextType)[] | InteractionContextType[];
+	ignore?: IgnoreCommand;
+	aliases?: readonly string[];
+	props?: ExtraProps;
+}
 
 export function Locales({
 	name: names,
@@ -49,7 +54,7 @@ export function Locales({
 	name?: [language: LocaleString, value: string][];
 	description?: [language: LocaleString, value: string][];
 }) {
-	return <T extends { new (...args: any[]): {} }>(target: T) =>
+	return <T extends { new (...args: any[]): object }>(target: T) =>
 		class extends target {
 			name_localizations = names ? Object.fromEntries(names) : undefined;
 			description_localizations = descriptions ? Object.fromEntries(descriptions) : undefined;
@@ -57,24 +62,37 @@ export function Locales({
 }
 
 export function LocalesT(name?: FlatObjectKeys<DefaultLocale>, description?: FlatObjectKeys<DefaultLocale>) {
-	return <T extends { new (...args: any[]): {} }>(target: T) =>
+	return <T extends { new (...args: any[]): object }>(target: T) =>
 		class extends target {
 			__t = { name, description };
 		};
 }
 
-export function GroupsT(
-	groups: Record<
-		string /* name for group*/,
-		{
-			name?: FlatObjectKeys<DefaultLocale>;
-			description?: FlatObjectKeys<DefaultLocale>;
-			defaultDescription: string;
-			aliases?: string[];
-		}
-	>,
-) {
-	return <T extends { new (...args: any[]): {} }>(target: T) =>
+export type TranslatedGroupDefinition = {
+	name?: FlatObjectKeys<DefaultLocale>;
+	description?: FlatObjectKeys<DefaultLocale>;
+	defaultDescription: string;
+	aliases?: string[];
+};
+
+export type LocalizedGroupDefinition = {
+	name?: [language: LocaleString, value: string][];
+	description?: [language: LocaleString, value: string][];
+	defaultDescription: string;
+	aliases?: string[];
+};
+
+export type GroupDefinition = TranslatedGroupDefinition | LocalizedGroupDefinition;
+export type GroupDefinitions = Record<string, LocalizedGroupDefinition> | Record<string, TranslatedGroupDefinition>;
+
+export function defineGroups<const T extends Record<string, LocalizedGroupDefinition>>(groups: T): T;
+export function defineGroups<const T extends Record<string, TranslatedGroupDefinition>>(groups: T): T;
+export function defineGroups(groups: GroupDefinitions): GroupDefinitions {
+	return groups;
+}
+
+export function GroupsT<const T extends Record<string /* name for group*/, TranslatedGroupDefinition>>(groups: T) {
+	return <T extends { new (...args: any[]): object }>(target: T) =>
 		class extends target {
 			__tGroups = groups;
 			groupsAliases: Record<string, string> = {};
@@ -89,18 +107,8 @@ export function GroupsT(
 		};
 }
 
-export function Groups(
-	groups: Record<
-		string /* name for group*/,
-		{
-			name?: [language: LocaleString, value: string][];
-			description?: [language: LocaleString, value: string][];
-			defaultDescription: string;
-			aliases?: string[];
-		}
-	>,
-) {
-	return <T extends { new (...args: any[]): {} }>(target: T) =>
+export function Groups<const T extends Record<string /* name for group*/, LocalizedGroupDefinition>>(groups: T) {
+	return <T extends { new (...args: any[]): object }>(target: T) =>
 		class extends target {
 			groups = groups;
 			groupsAliases: Record<string, string> = {};
@@ -115,15 +123,48 @@ export function Groups(
 		};
 }
 
-export function Group(groupName: string) {
-	return <T extends { new (...args: any[]): {} }>(target: T) =>
+type GroupDecorator = <T extends { new (...args: any[]): object }>(
+	target: T,
+) => {
+	new (...args: any[]): { group: string };
+} & T;
+
+type OptionsDecorator = <T extends { new (...args: any[]): object }>(
+	target: T,
+) => {
+	new (...args: any[]): { options: SubCommand[] | CommandOption[] };
+} & T;
+
+type LowercaseOptionsRecord<T extends OptionsRecord> = T & {
+	[K in keyof T as K extends string ? (K extends Lowercase<K> ? never : K) : never]: never;
+};
+
+type LowercaseDeclareName<T extends CommandDeclareOptions> = {
+	[K in keyof T]: K extends 'name'
+		? T extends { type: ApplicationCommandType.User | ApplicationCommandType.Message }
+			? T[K]
+			: string extends T[K]
+				? T[K]
+				: T[K] extends Lowercase<T[K] & string>
+					? T[K]
+					: Lowercase<T[K] & string>
+		: T[K];
+};
+
+export function Group(groupName: string): GroupDecorator;
+export function Group<const T extends GroupDefinitions>(_groupsDef: T, groupName: keyof T & string): GroupDecorator;
+export function Group(groupsDefOrGroupName: GroupDefinitions | string, groupName?: string) {
+	const resolvedGroupName = typeof groupsDefOrGroupName === 'string' ? groupsDefOrGroupName : groupName!;
+	return <T extends { new (...args: any[]): object }>(target: T) =>
 		class extends target {
-			group = groupName;
+			group = resolvedGroupName;
 		};
 }
 
+export function Options(options: (new () => SubCommand)[]): OptionsDecorator;
+export function Options<const T extends OptionsRecord>(options: LowercaseOptionsRecord<T>): OptionsDecorator;
 export function Options(options: (new () => SubCommand)[] | OptionsRecord) {
-	return <T extends { new (...args: any[]): {} }>(target: T) =>
+	return <T extends { new (...args: any[]): object }>(target: T) =>
 		class extends target {
 			options: SubCommand[] | CommandOption[] = Array.isArray(options)
 				? options.map(x => new x())
@@ -137,53 +178,56 @@ export function Options(options: (new () => SubCommand)[] | OptionsRecord) {
 }
 
 export function AutoLoad() {
-	return <T extends { new (...args: any[]): {} }>(target: T) =>
+	return <T extends { new (...args: any[]): object }>(target: T) =>
 		class extends target {
 			__autoload = true;
 		};
 }
 
-export type ParseMiddlewares<T extends Record<string, MiddlewareContext>> = {
-	[k in keyof T]: T[k];
-};
+export function middlewares<const T extends readonly MiddlewareKey[]>(...cbs: T) {
+	return cbs;
+}
 
-export function Middlewares(cbs: readonly (keyof RegisteredMiddlewares)[]) {
-	return <T extends { new (...args: any[]): {} }>(target: T) =>
+export function Middlewares(cbs: readonly MiddlewareKey[]) {
+	return <T extends { new (...args: any[]): object }>(target: T) =>
 		class extends target {
 			middlewares = cbs;
 		};
 }
 
-export function Declare(declare: DeclareOptions) {
-	return <T extends { new (...args: any[]): {} }>(target: T) =>
+export function Declare<const T extends CommandDeclareOptions>(input: LowercaseDeclareName<T>) {
+	const declare = input as unknown as CommandDeclareOptions;
+	return <C extends { new (...args: any[]): object }>(target: C) =>
 		class extends target {
 			name = declare.name;
 			nsfw = declare.nsfw;
 			props = declare.props;
 			contexts =
-				declare.contexts?.map(i => InteractionContextType[i]) ??
+				declare.contexts?.map(i => (typeof i === 'string' ? InteractionContextType[i] : i)) ??
 				Object.values(InteractionContextType).filter(x => typeof x === 'number');
-			integrationTypes = declare.integrationTypes?.map(i => ApplicationIntegrationType[i]) ?? [
-				ApplicationIntegrationType.GuildInstall,
-			];
-			defaultMemberPermissions = Array.isArray(declare.defaultMemberPermissions)
-				? declare.defaultMemberPermissions?.reduce((acc, prev) => acc | PermissionFlagsBits[prev], BigInt(0))
+			integrationTypes = declare.integrationTypes?.map(i =>
+				typeof i === 'string' ? ApplicationIntegrationType[i] : i,
+			) ?? [ApplicationIntegrationType.GuildInstall];
+			defaultMemberPermissions = declare.defaultMemberPermissions
+				? PermissionsBitField.resolve(declare.defaultMemberPermissions)
 				: declare.defaultMemberPermissions;
-			botPermissions = Array.isArray(declare.botPermissions)
-				? declare.botPermissions?.reduce((acc, prev) => acc | PermissionFlagsBits[prev], BigInt(0))
+			botPermissions = declare.botPermissions
+				? PermissionsBitField.resolve(declare.botPermissions)
 				: declare.botPermissions;
 			description = '';
 			type: ApplicationCommandType = ApplicationCommandType.ChatInput;
 			guildId?: string[];
 			ignore?: IgnoreCommand;
 			aliases?: string[];
+			handler?: EntryPointCommandHandlerType;
 			constructor(...args: any[]) {
 				super(...args);
 				if ('description' in declare) this.description = declare.description;
 				if ('type' in declare) this.type = declare.type;
-				if ('guildId' in declare) this.guildId = declare.guildId;
+				if ('guildId' in declare) this.guildId = declare.guildId?.slice();
 				if ('ignore' in declare) this.ignore = declare.ignore;
-				if ('aliases' in declare) this.aliases = declare.aliases;
+				if ('aliases' in declare) this.aliases = declare.aliases?.slice();
+				if ('handler' in declare) this.handler = declare.handler;
 				// check if all properties are valid
 			}
 		};

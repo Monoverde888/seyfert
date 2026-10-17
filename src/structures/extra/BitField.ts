@@ -1,13 +1,13 @@
-export type BitFieldResolvable<T extends object> = keyof T | number | bigint | (keyof T | number | bigint)[];
+export type BitFieldResolvable<T extends object> = keyof T | number | bigint | string;
 
 export class BitField<T extends object> {
 	static None = 0n;
 	Flags: Record<string, bigint> = {};
 
-	private bit: bigint;
+	protected bit: bigint = BitField.None;
 
 	constructor(bitfields?: BitFieldResolvable<T>) {
-		this.bit = this.resolve(bitfields);
+		if (bitfields) this.bit = this.resolve(bitfields);
 	}
 
 	set bits(bits: BitFieldResolvable<T>) {
@@ -18,71 +18,37 @@ export class BitField<T extends object> {
 		return this.bit;
 	}
 
-	add(...bits: BitFieldResolvable<T>[]): bigint {
-		let reduced = BitField.None;
-
-		for (const bit of bits) {
-			reduced |= this.resolve(bit);
-		}
-
-		return (this.bit |= reduced);
-	}
-
-	remove(...bits: BitFieldResolvable<T>[]): bigint {
-		let reduced = BitField.None;
-
-		for (const bit of bits) {
-			reduced |= this.resolve(bit);
-		}
-
-		return (this.bit &= ~reduced);
-	}
-
-	has(...bits: BitFieldResolvable<T>[]) {
-		const bitsResolved = bits.map(bit => this.resolve(bit));
+	has(bits: BitFieldResolvable<T> | BitFieldResolvable<T>[]) {
+		const data = Array.isArray(bits) ? bits : [bits];
+		const bitsResolved = data.map(bit => this.resolve(bit));
 		return bitsResolved.every(bit => (this.bits & bit) === bit);
 	}
 
-	missings(...bits: BitFieldResolvable<T>[]) {
+	missings(bits: BitFieldResolvable<T>[]) {
 		const bitsResolved = bits.map(bit => this.resolve(bit));
 		return bitsResolved.filter(bit => (this.bits & bit) !== bit);
 	}
 
-	equals(other: BitFieldResolvable<T>) {
+	equals(other: BitFieldResolvable<T>[]) {
 		return this.bits === this.resolve(other);
 	}
 
-	resolve(bits?: BitFieldResolvable<T>): bigint {
-		switch (typeof bits) {
-			case 'number':
-				return BigInt(bits);
-			case 'string':
-				return this.resolve(this.Flags[bits]);
-			case 'bigint':
-				return bits;
-			case 'object':
-				if (!Array.isArray(bits)) {
-					throw new TypeError(`Cannot resolve permission: ${bits}`);
+	keys(bits: BitFieldResolvable<T>[] = [this.bits]): (keyof T)[] {
+		const bitsResolved = bits.map(bit => this.resolve(bit));
+		return Object.entries(this.Flags).reduce(
+			(acc, value) => {
+				if (bitsResolved.some(bit => (bit & value[1]) === value[1])) {
+					acc.push(value[0] as keyof T);
+					return acc;
 				}
-				return bits.map(x => this.resolve(x)).reduce((acc, cur) => acc | cur, BitField.None);
-			default:
-				throw new TypeError(`Cannot resolve permission: ${typeof bits === 'symbol' ? String(bits) : (bits as any)}`);
-		}
-	}
-
-	keys(bits: BitFieldResolvable<T>[] = [this.bits]) {
-		const bitsResolved = bits.map(bit => BigInt(this.resolve(bit)));
-		return Object.entries(this.Flags).reduce((acc, value) => {
-			if (bitsResolved.some(bit => (bit & value[1]) === value[1])) {
-				acc.push(value[0]);
 				return acc;
-			}
-			return acc;
-		}, [] as string[]);
+			},
+			[] as (keyof T)[],
+		);
 	}
 
 	values(bits: BitFieldResolvable<T>[] = [this.bits]) {
-		const bitsResolved = bits.map(bit => BigInt(this.resolve(bit)));
+		const bitsResolved = bits.map(bit => this.resolve(bit));
 		return Object.entries(this.Flags).reduce((acc, value) => {
 			if (bitsResolved.some(bit => (bit & value[1]) === value[1])) {
 				acc.push(value[1]);
@@ -90,5 +56,55 @@ export class BitField<T extends object> {
 			}
 			return acc;
 		}, [] as bigint[]);
+	}
+
+	add(bits: BitFieldResolvable<T>[]) {
+		for (const bit of bits) {
+			if (!bit) continue;
+			this.bits |= this.resolve(bit);
+		}
+		return this.bits;
+	}
+
+	remove(bits: BitFieldResolvable<T>[]): bigint {
+		for (const bit of bits) {
+			this.bits &= ~this.resolve(bit);
+		}
+		return this.bits;
+	}
+
+	resolve(bits: BitFieldResolvable<T> | BitFieldResolvable<T>[], _flags?: Record<string, bigint>): bigint {
+		const flags = _flags ?? this.Flags;
+		let bitsResult = 0n;
+
+		for (const bit of Array.isArray(bits) ? bits : [bits]) {
+			switch (typeof bit) {
+				case 'string':
+					if (Object.hasOwn(flags, bit)) {
+						bitsResult |= flags[bit];
+					} else if (/^\d+$/.test(bit)) {
+						bitsResult |= BigInt(bit);
+					} else {
+						throw new TypeError(`Cannot resolve bitfield: ${bit}`);
+					}
+					break;
+				case 'number':
+					if (!Number.isSafeInteger(bit) || bit < 0) {
+						throw new TypeError(`Cannot resolve bitfield: ${bit}`);
+					}
+					bitsResult |= BigInt(bit);
+					break;
+				case 'bigint':
+					if (bit < 0n) {
+						throw new TypeError(`Cannot resolve bitfield: ${bit}`);
+					}
+					bitsResult |= bit;
+					break;
+				default:
+					throw new TypeError(`Cannot resolve bitfield: ${typeof bit === 'symbol' ? String(bit) : (bit as unknown)}`);
+			}
+		}
+
+		return bitsResult;
 	}
 }

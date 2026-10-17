@@ -1,5 +1,5 @@
-import type { APIEmbed, APIEmbedAuthor, APIEmbedField, APIEmbedFooter } from 'discord-api-types/v10';
-import { resolveColor, toSnakeCase, type ColorResolvable, type ObjectToLower, type RestOrArray } from '../common';
+import { type ColorResolvable, type ObjectToLower, type RestOrArray, resolveColor, toSnakeCase } from '../common';
+import type { APIEmbed, APIEmbedAuthor, APIEmbedField, APIEmbedFooter } from '../types';
 
 /**
  * Represents a message embed.
@@ -11,14 +11,16 @@ import { resolveColor, toSnakeCase, type ColorResolvable, type ObjectToLower, ty
  * const embedJSON = embed.json();
  */
 export class Embed {
+	public data: Partial<APIEmbed>;
 	/**
 	 * Creates a new instance of Embed.
 	 * @param data - The initial data for the embed.
 	 * @example
 	 * const embed = new Embed({ title: 'Hello', description: 'This is an example embed' });
 	 */
-	constructor(public data: Partial<APIEmbed> = {}) {
-		if (!data.fields) this.data.fields = [];
+	constructor(data: Partial<APIEmbed> = {}) {
+		this.data = { ...data };
+		if (!this.data.fields) this.data.fields = [];
 	}
 
 	/**
@@ -26,10 +28,10 @@ export class Embed {
 	 * @param author - The author information.
 	 * @returns The updated Embed instance.
 	 * @example
-	 * embed.setAuthor({ name: 'John Doe', iconURL: 'https://example.com/avatar.png' });
+	 * embed.setAuthor({ name: 'John Doe', iconUrl: 'https://example.com/avatar.png' });
 	 */
-	setAuthor(author: ObjectToLower<APIEmbedAuthor>): this {
-		this.data.author = toSnakeCase(author);
+	setAuthor(author?: ObjectToLower<APIEmbedAuthor>): this {
+		this.data.author = author && toSnakeCase(author);
 		return this;
 	}
 
@@ -41,8 +43,8 @@ export class Embed {
 	 * embed.setColor('#FF0000');
 	 * embed.setColor('Blurple');
 	 */
-	setColor(color: ColorResolvable): this {
-		this.data.color = resolveColor(color);
+	setColor(color?: ColorResolvable): this {
+		this.data.color = color && resolveColor(color);
 		return this;
 	}
 
@@ -53,7 +55,7 @@ export class Embed {
 	 * @example
 	 * embed.setDescription('This is the description of the embed');
 	 */
-	setDescription(desc: string): this {
+	setDescription(desc?: string): this {
 		this.data.description = desc;
 		return this;
 	}
@@ -77,8 +79,8 @@ export class Embed {
 	 * @example
 	 * embed.setFields([{ name: 'Field 1', value: 'Value 1' }, { name: 'Field 2', value: 'Value 2' }]);
 	 */
-	setFields(fields: APIEmbedField[]): this {
-		this.data.fields = fields;
+	setFields(fields?: APIEmbedField[]): this {
+		this.data.fields = fields ?? [];
 		return this;
 	}
 
@@ -87,10 +89,10 @@ export class Embed {
 	 * @param footer - The footer information.
 	 * @returns The updated Embed instance.
 	 * @example
-	 * embed.setFooter({ text: 'This is the footer', iconURL: 'https://example.com/footer.png' });
+	 * embed.setFooter({ text: 'This is the footer', iconUrl: 'https://example.com/footer.png' });
 	 */
-	setFooter(footer: ObjectToLower<Omit<APIEmbedFooter, 'proxy_icon_url'>>): this {
-		this.data.footer = toSnakeCase(footer);
+	setFooter(footer?: ObjectToLower<Omit<APIEmbedFooter, 'proxy_icon_url'>>): this {
+		this.data.footer = footer && toSnakeCase(footer);
 		return this;
 	}
 
@@ -101,8 +103,8 @@ export class Embed {
 	 * @example
 	 * embed.setImage('https://example.com/image.png');
 	 */
-	setImage(url: string): this {
-		this.data.image = { url };
+	setImage(url?: string): this {
+		this.data.image = url ? { url } : undefined;
 		return this;
 	}
 
@@ -127,7 +129,7 @@ export class Embed {
 	 * @example
 	 * embed.setTitle('This is the title');
 	 */
-	setTitle(title: string): this {
+	setTitle(title?: string): this {
 		this.data.title = title;
 		return this;
 	}
@@ -139,7 +141,7 @@ export class Embed {
 	 * @example
 	 * embed.setURL('https://seyfert.com');
 	 */
-	setURL(url: string): this {
+	setURL(url?: string): this {
 		this.data.url = url;
 		return this;
 	}

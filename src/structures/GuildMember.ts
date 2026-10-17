@@ -2,10 +2,31 @@ import { DiscordBase } from './extra/DiscordBase';
 
 export type GuildMemberData =
 	| APIGuildMember
+	| Omit<APIGuildMember, 'user'>
 	| GatewayGuildMemberUpdateDispatchData
 	| GatewayGuildMemberAddDispatchData
 	| APIInteractionDataResolvedGuildMember;
 
+import type { GuildRoleStructure, ReturnCache } from '../';
+import {
+	type DMChannelStructure,
+	type GuildMemberStructure,
+	type GuildStructure,
+	type MessageStructure,
+	Transformers,
+	type UserStructure,
+	type VoiceStateStructure,
+} from '../client/transformers';
+import type { UsingClient } from '../commands';
+import {
+	type BanOptions,
+	Formatter,
+	type GuildMemberResolvable,
+	type ImageOptions,
+	type MessageCreateBodyRequest,
+	type MethodContext,
+	type ObjectToLower,
+} from '../common';
 import type {
 	APIGuildMember,
 	APIInteractionDataResolvedGuildMember,
@@ -15,19 +36,10 @@ import type {
 	RESTGetAPIGuildMembersQuery,
 	RESTGetAPIGuildMembersSearchQuery,
 	RESTPatchAPIGuildMemberJSONBody,
-	RESTPutAPIGuildBanJSONBody,
 	RESTPutAPIGuildMemberJSONBody,
-} from 'discord-api-types/v10';
-import type { UsingClient } from '../commands';
-import type { MakeRequired, MessageCreateBodyRequest, ObjectToLower, ToClass } from '../common';
-import type { ImageOptions, MethodContext } from '../common/types/options';
-import type { GuildMemberResolvable } from '../common/types/resolvables';
-import { User } from './User';
+} from '../types';
 import { PermissionsBitField } from './extra/Permissions';
-
-export type GatewayGuildMemberAddDispatchDataFixed<Pending extends boolean> = Pending extends true
-	? Omit<GatewayGuildMemberAddDispatchData, 'user'> & { id: string }
-	: MakeRequired<GatewayGuildMemberAddDispatchData, 'user'>;
+import { GuildRole } from './GuildRole';
 
 export interface BaseGuildMember extends DiscordBase, ObjectToLower<Omit<APIGuildMember, 'user' | 'roles'>> {}
 export class BaseGuildMember extends DiscordBase {
@@ -47,36 +59,64 @@ export class BaseGuildMember extends DiscordBase {
 		this.patch(data);
 	}
 
-	guild(force = false) {
-		return this.client.guilds.fetch(this.id, force);
+	guild(mode?: 'rest' | 'flow'): Promise<GuildStructure<'cached' | 'api'>>;
+	guild(mode: 'cache'): ReturnCache<GuildStructure<'cached'> | undefined>;
+	guild(mode: 'cache' | 'rest' | 'flow' = 'flow') {
+		switch (mode) {
+			case 'cache':
+				return (
+					this.client.cache.guilds?.get(this.guildId) ||
+					(this.client.cache.adapter.isAsync ? (Promise.resolve() as any) : undefined)
+				);
+			default:
+				return this.client.guilds.fetch(this.guildId, mode === 'rest');
+		}
 	}
 
-	fetch(force = false) {
+	fetch(force = false): Promise<GuildMemberStructure> {
 		return this.client.members.fetch(this.guildId, this.id, force);
 	}
 
-	ban(body?: RESTPutAPIGuildBanJSONBody, reason?: string) {
-		return this.client.members.ban(this.guildId, this.id, body, reason);
+	ban(options?: BanOptions) {
+		return this.client.members.ban(this.guildId, this.id, options);
 	}
 
 	kick(reason?: string) {
 		return this.client.members.kick(this.guildId, this.id, reason);
 	}
 
-	edit(body: RESTPatchAPIGuildMemberJSONBody, reason?: string) {
+	edit(body: RESTPatchAPIGuildMemberJSONBody, reason?: string): Promise<GuildMemberStructure> {
 		return this.client.members.edit(this.guildId, this.id, body, reason);
 	}
 
 	presence() {
-		return this.client.members.presence(this.id);
+		return this.client.members.presence(this.guildId, this.id);
 	}
 
-	voice() {
-		return this.client.members.voice(this.guildId, this.id);
+	voice(mode?: 'rest' | 'flow'): Promise<VoiceStateStructure>;
+	voice(mode: 'cache'): ReturnCache<VoiceStateStructure | undefined>;
+	voice(mode: 'cache' | 'rest' | 'flow' = 'flow') {
+		switch (mode) {
+			case 'cache':
+				return (
+					this.client.cache.voiceStates?.get(this.id, this.guildId) ||
+					(this.client.cache.adapter.isAsync ? (Promise.resolve() as any) : undefined)
+				);
+			default:
+				return this.client.members.voice(this.guildId, this.id, mode === 'rest');
+		}
 	}
 
 	toString() {
-		return `<@${this.id}>`;
+		return Formatter.userMention(this.id);
+	}
+
+	timeout(time: null | number, reason?: string): Promise<GuildMemberStructure> {
+		return this.client.members.timeout(this.guildId, this.id, time, reason);
+	}
+
+	get hasTimeout(): false | number {
+		return this.client.members.hasTimeout(this);
 	}
 
 	private patch(data: GuildMemberData) {
@@ -92,8 +132,8 @@ export class BaseGuildMember extends DiscordBase {
 
 	get roles() {
 		return {
-			keys: Object.freeze(this._roles.concat(this.guildId)) as string[],
-			list: (force = false) =>
+			keys: Object.freeze(this._roles.concat(this.guildId)) as readonly string[],
+			list: (force = false): Promise<GuildRoleStructure[]> =>
 				this.client.roles
 					.list(this.guildId, force)
 					.then(roles => roles.filter(role => this.roles.keys.includes(role.id))),
@@ -101,25 +141,32 @@ export class BaseGuildMember extends DiscordBase {
 			remove: (id: string) => this.client.members.removeRole(this.guildId, this.id, id),
 			permissions: (force = false) =>
 				this.roles.list(force).then(roles => new PermissionsBitField(roles.map(x => BigInt(x.permissions.bits)))),
-			sorted: (force = false) => this.roles.list(force).then(roles => roles.sort((a, b) => b.position - a.position)),
-			highest: (force = false) => this.roles.sorted(force).then(roles => roles[0]),
+			sorted: (force = false): Promise<GuildRoleStructure[]> =>
+				this.roles.list(force).then(roles => roles.sort((a, b) => GuildRole.comparePositions(b, a))),
+			highest: (force = false): Promise<GuildRoleStructure | undefined> =>
+				this.roles.sorted(force).then(roles => roles.at(0)),
 		};
 	}
 
 	static methods({ client, guildId }: MethodContext<{ guildId: string }>) {
 		return {
-			resolve: (resolve: GuildMemberResolvable) => client.members.resolve(guildId, resolve),
-			search: (query?: RESTGetAPIGuildMembersSearchQuery) => client.members.search(guildId, query),
-			unban: (id: string, body?: RESTPutAPIGuildBanJSONBody, reason?: string) =>
-				client.members.unban(guildId, id, body, reason),
-			ban: (id: string, body?: RESTPutAPIGuildBanJSONBody, reason?: string) =>
-				client.members.ban(guildId, id, body, reason),
+			resolve: (resolve: GuildMemberResolvable): Promise<GuildMemberStructure | undefined> =>
+				client.members.resolve(guildId, resolve),
+			search: (query: RESTGetAPIGuildMembersSearchQuery): Promise<GuildMemberStructure[]> =>
+				client.members.search(guildId, query),
+			unban: (id: string, reason?: string) => client.members.unban(guildId, id, reason),
+			ban: (id: string, options?: BanOptions) => client.members.ban(guildId, id, options),
 			kick: (id: string, reason?: string) => client.members.kick(guildId, id, reason),
-			edit: (id: string, body: RESTPatchAPIGuildMemberJSONBody, reason?: string) =>
+			edit: (id: string, body: RESTPatchAPIGuildMemberJSONBody, reason?: string): Promise<GuildMemberStructure> =>
 				client.members.edit(guildId, id, body, reason),
-			add: (id: string, body: RESTPutAPIGuildMemberJSONBody) => client.members.add(guildId, id, body),
-			fetch: (memberId: string, force = false) => client.members.fetch(guildId, memberId, force),
-			list: (query?: RESTGetAPIGuildMembersQuery, force = false) => client.members.list(guildId, query, force),
+			add: (id: string, body: RESTPutAPIGuildMemberJSONBody): Promise<GuildMemberStructure | undefined> =>
+				client.members.add(guildId, id, body),
+			addRole: (memberId: string, id: string) => client.members.addRole(guildId, memberId, id),
+			removeRole: (memberId: string, id: string) => client.members.removeRole(guildId, memberId, id),
+			fetch: (memberId: string, force = false): Promise<GuildMemberStructure> =>
+				client.members.fetch(guildId, memberId, force),
+			list: (query?: RESTGetAPIGuildMembersQuery, force = false): Promise<GuildMemberStructure[]> =>
+				client.members.list(guildId, query, force),
 		};
 	}
 }
@@ -127,20 +174,20 @@ export class BaseGuildMember extends DiscordBase {
 export interface GuildMember extends ObjectToLower<Omit<APIGuildMember, 'user' | 'roles'>> {}
 /**
  * Represents a guild member
- * @link https://discord.com/developers/docs/resources/guild#guild-member-object
+ * @link https://docs.discord.com/developers/resources/guild#guild-member-object
  */
 export class GuildMember extends BaseGuildMember {
-	user: User;
+	user: UserStructure;
 	private __me?: GuildMember;
 	constructor(
 		client: UsingClient,
 		data: GuildMemberData,
-		user: APIUser | User,
+		user: APIUser,
 		/** the choosen guild id */
 		readonly guildId: string,
 	) {
 		super(client, data, user.id, guildId);
-		this.user = user instanceof User ? user : new User(client, user);
+		this.user = Transformers.User(client, user);
 	}
 
 	get tag() {
@@ -168,11 +215,11 @@ export class GuildMember extends BaseGuildMember {
 		return this.nick ?? this.globalName ?? this.username;
 	}
 
-	dm(force = false) {
+	dm(force = false): Promise<DMChannelStructure> {
 		return this.user.dm(force);
 	}
 
-	write(body: MessageCreateBodyRequest) {
+	write(body: MessageCreateBodyRequest): Promise<MessageStructure> {
 		return this.user.write(body);
 	}
 
@@ -184,14 +231,20 @@ export class GuildMember extends BaseGuildMember {
 	avatarURL(options?: ImageOptions & { exclude?: false }): string;
 	avatarURL(options?: ImageOptions & { exclude?: boolean }): string | null {
 		if (!this.avatar) {
-			return options?.exclude ? null : this.user.avatarURL();
+			return options?.exclude ? null : this.user.avatarURL(options);
 		}
 
 		return this.rest.cdn.guilds(this.guildId).users(this.id).avatars(this.avatar).get(options);
 	}
 
-	bannerURL(options?: ImageOptions) {
-		return this.user.bannerURL(options);
+	bannerURL(options: ImageOptions & { exclude: true }): string | undefined | null;
+	bannerURL(options?: ImageOptions & { exclude?: false }): string | undefined;
+	bannerURL(options?: ImageOptions & { exclude?: boolean }): string | undefined | null {
+		if (!this.banner) {
+			return options?.exclude ? null : this.user.bannerURL(options);
+		}
+
+		return this.rest.cdn.guilds(this.guildId).users(this.id).banners(this.banner).get(options);
 	}
 
 	async fetchPermissions(force = false) {
@@ -200,27 +253,48 @@ export class GuildMember extends BaseGuildMember {
 	}
 
 	async manageable(force = false) {
-		this.__me = await this.client.guilds.fetchSelf(this.guildId, force);
-		const ownerId = (await this.client.guilds.fetch(this.guildId, force)).ownerId;
+		const [me, guild] = await Promise.all([
+			this.client.guilds.fetchSelf(this.guildId, force),
+			this.client.guilds.fetch(this.guildId, force),
+		]);
+		this.__me = me;
+		const ownerId = guild.ownerId;
 		if (this.user.id === ownerId) return false;
 		if (this.user.id === this.client.botId) return false;
 		if (this.client.botId === ownerId) return true;
-		return (await this.__me!.roles.highest()).position > (await this.roles.highest(force)).position;
+		const highestFromCompleteRoles = async (member: Pick<GuildMemberStructure, 'roles'>, forceRoles: boolean) => {
+			const roles = await member.roles.sorted(forceRoles);
+			const roleIds = new Set(roles.map(role => role.id));
+			if (!member.roles.keys.every(roleId => roleIds.has(roleId))) return;
+
+			return roles.at(0);
+		};
+
+		const myHighest = await highestFromCompleteRoles(me, force);
+		const theirHighest = await highestFromCompleteRoles(this, force);
+		if (myHighest && theirHighest) return GuildRole.comparePositions(myHighest, theirHighest) > 0;
+		if (force) return false;
+
+		const forcedMyHighest = await highestFromCompleteRoles(me, true);
+		const forcedTheirHighest = await highestFromCompleteRoles(this, true);
+		if (!forcedMyHighest || !forcedTheirHighest) return false;
+
+		return GuildRole.comparePositions(forcedMyHighest, forcedTheirHighest) > 0;
 	}
 
 	async bannable(force = false) {
-		return (await this.manageable(force)) && (await this.__me!.fetchPermissions(force)).has('BanMembers');
+		return (await this.manageable(force)) && (await this.__me!.fetchPermissions(force)).has(['BanMembers']);
 	}
 
 	async kickable(force = false) {
-		return (await this.manageable(force)) && (await this.__me!.fetchPermissions(force)).has('KickMembers');
+		return (await this.manageable(force)) && (await this.__me!.fetchPermissions(force)).has(['KickMembers']);
 	}
 
 	async moderatable(force = false) {
 		return (
-			!(await this.roles.permissions(force)).has('Administrator') &&
+			!(await this.roles.permissions(force)).has(['Administrator']) &&
 			(await this.manageable(force)) &&
-			(await this.__me!.fetchPermissions(force)).has('KickMembers')
+			(await this.__me!.fetchPermissions(force)).has(['KickMembers'])
 		);
 	}
 }
@@ -235,21 +309,18 @@ export interface InteractionGuildMember
 	extends ObjectToLower<Omit<APIInteractionDataResolvedGuildMember, 'roles' | 'deaf' | 'mute' | 'permissions'>> {}
 /**
  * Represents a guild member
- * @link https://discord.com/developers/docs/resources/guild#guild-member-object
+ * @link https://docs.discord.com/developers/resources/guild#guild-member-object
  */
-export class InteractionGuildMember extends (GuildMember as unknown as ToClass<
-	Omit<GuildMember, 'deaf' | 'mute'>,
-	InteractionGuildMember
->) {
+export class InteractionGuildMember extends GuildMember {
 	permissions: PermissionsBitField;
 	constructor(
 		client: UsingClient,
 		data: APIInteractionDataResolvedGuildMember,
-		user: APIUser | User,
+		user: APIUser,
 		/** the choosen guild id */
 		guildId: string,
 	) {
 		super(client, data, user, guildId);
-		this.permissions = new PermissionsBitField(Number(data.permissions));
+		this.permissions = new PermissionsBitField(BigInt(data.permissions));
 	}
 }

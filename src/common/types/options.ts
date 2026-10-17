@@ -1,9 +1,14 @@
-import type { Identify } from '..';
 import type { CDNUrlOptions } from '../../api';
 import type { UsingClient } from '../../commands';
+import type { Identify } from '..';
 
 export type ImageOptions = CDNUrlOptions;
 
-export type MethodContext<T = {}> = Identify<{ client: UsingClient } & T>;
+export interface BanOptions {
+	deleteMessageSeconds?: number;
+	reason?: string;
+}
 
-export type MessageWebhookPayload<Body, Extra = {}> = Identify<{ body: Body } & Extra>;
+export type MethodContext<T = object> = Identify<{ client: UsingClient } & T>;
+
+export type MessageWebhookPayload<Body, Extra = object> = Identify<{ body: Body } & Extra>;

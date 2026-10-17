@@ -1,7 +1,8 @@
-import type { APIUser } from 'discord-api-types/v10';
 import { calculateUserDefaultAvatarIndex } from '../api';
-import type { MessageCreateBodyRequest, ObjectToLower } from '../common';
+import type { DMChannelStructure, MessageStructure, UserStructure } from '../client';
+import { Formatter, type MessageCreateBodyRequest, type ObjectToLower } from '../common';
 import type { ImageOptions } from '../common/types/options';
+import type { APIUser } from '../types';
 import { DiscordBase } from './extra/DiscordBase';
 
 export interface User extends ObjectToLower<APIUser> {}
@@ -18,18 +19,18 @@ export class User extends DiscordBase<APIUser> {
 	/**
 	 * Fetch user
 	 */
-	fetch(force = false) {
+	fetch(force = false): Promise<UserStructure> {
 		return this.client.users.fetch(this.id, force);
 	}
 
 	/**
 	 * Open a DM with the user
 	 */
-	dm(force = false) {
+	dm(force = false): Promise<DMChannelStructure> {
 		return this.client.users.createDM(this.id, force);
 	}
 
-	write(body: MessageCreateBodyRequest) {
+	write(body: MessageCreateBodyRequest): Promise<MessageStructure> {
 		return this.client.users.write(this.id, body);
 	}
 
@@ -46,8 +47,8 @@ export class User extends DiscordBase<APIUser> {
 	}
 
 	avatarDecorationURL(options?: ImageOptions) {
-		if (!this.avatarDecoration) return;
-		return this.rest.cdn['avatar-decorations'](this.id).get(this.avatarDecoration, options);
+		if (!this.avatarDecorationData) return;
+		return this.rest.cdn['avatar-decoration-presets'](this.avatarDecorationData.asset).get(options);
 	}
 
 	bannerURL(options?: ImageOptions) {
@@ -55,11 +56,15 @@ export class User extends DiscordBase<APIUser> {
 		return this.rest.cdn.banners(this.id).get(this.banner, options);
 	}
 
-	presence() {
-		return this.client.members.presence(this.id);
+	/**
+	 * Gets the user's cached presence in a guild.
+	 * @param guildId The ID of the guild.
+	 */
+	presence(guildId: string) {
+		return this.client.members.presence(guildId, this.id);
 	}
 
 	toString() {
-		return `<@${this.id}>`;
+		return Formatter.userMention(this.id);
 	}
 }

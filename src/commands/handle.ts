@@ -1,0 +1,1066 @@
+import type { Client, WorkerClient } from '../client';
+import { runContextScopes, runPluginAutocompleteWrappers, runPluginCommandObservers } from '../client/plugins';
+import { type MessageStructure, type OptionResolverStructure, Transformers } from '../client/transformers';
+import { type Awaitable, type MakeRequired, type PermissionStrings, SeyfertError } from '../common';
+import { INTEGER_OPTION_VALUE_LIMIT } from '../common/it/constants';
+import { ComponentContext, ModalContext } from '../components';
+import {
+	type __InternalReplyFunction,
+	AutocompleteInteraction,
+	BaseInteraction,
+	type ChatInputCommandInteraction,
+	type ComponentInteraction,
+	type EntryPointInteraction,
+	type MessageCommandInteraction,
+	type ModalSubmitInteraction,
+	type UserCommandInteraction,
+} from '../structures';
+import type { PermissionsBitField } from '../structures/extra/Permissions';
+import {
+	type APIApplicationCommandInteraction,
+	type APIApplicationCommandInteractionDataBasicOption,
+	type APIApplicationCommandInteractionDataOption,
+	type APIGuildMember,
+	type APIInteraction,
+	type APIInteractionDataResolvedChannel,
+	ApplicationCommandOptionType,
+	ApplicationCommandType,
+	ChannelType,
+	type GatewayMessageCreateDispatchData,
+	InteractionContextType,
+	InteractionType,
+	RESTJSONErrorCodes,
+} from '../types';
+import {
+	BaseCommand,
+	Command,
+	type CommandAutocompleteOption,
+	CommandContext,
+	type CommandOption,
+	type ContextMenuCommand,
+	type ContextOptionsResolved,
+	type EntryPointCommand,
+	EntryPointContext,
+	IgnoreCommand,
+	MenuCommandContext,
+	type MessageCommandOptionErrors,
+	type ResolvedRegisteredMiddlewares,
+	type SeyfertChannelOption,
+	type SeyfertIntegerOption,
+	type SeyfertNumberOption,
+	type SeyfertStringOption,
+	SubCommand,
+	type UsingClient,
+} from '.';
+
+export type CommandOptionWithType = CommandOption & {
+	type: ApplicationCommandOptionType;
+};
+
+export interface CommandFromContent {
+	command?: Command | SubCommand;
+	parent?: Command;
+	fullCommandName: string;
+}
+
+export class HandleCommand {
+	constructor(public client: UsingClient) {}
+
+	async autocomplete(
+		interaction: AutocompleteInteraction,
+		optionsResolver: OptionResolverStructure,
+		command?: CommandAutocompleteOption,
+	) {
+		return runPluginAutocompleteWrappers(
+			this.client,
+			{ client: this.client, command, interaction, optionsResolver },
+			() => this.runAutocomplete(interaction, optionsResolver, command),
+		);
+	}
+
+	private async runAutocomplete(
+		interaction: AutocompleteInteraction,
+		optionsResolver: OptionResolverStructure,
+		command?: CommandAutocompleteOption,
+	) {
+		// idc, is a YOU problem
+		if (!command?.autocomplete) {
+			return this.client.logger.warn(
+				`${optionsResolver.fullCommandName} ${command?.name} command does not have 'autocomplete' callback`,
+			);
+		}
+
+		try {
+			try {
+				try {
+					await command.autocomplete(interaction);
+				} catch (error) {
+					if (!command.onAutocompleteError)
+						return this.client.logger.error(
+							`${optionsResolver.fullCommandName} ${command.name} just threw an error, ${
+								error ? (typeof error === 'object' && 'message' in error ? error.message : error) : 'Unknown'
+							}`,
+						);
+					await command.onAutocompleteError(interaction, error);
+				}
+			} catch (error) {
+				await optionsResolver.getCommand()?.onInternalError?.(this.client, optionsResolver.getCommand()!, error);
+			}
+		} catch (error) {
+			this.client.logger.error(`[${optionsResolver.fullCommandName}] Internal error:`, error);
+		}
+	}
+
+	async contextMenu(
+		command: ContextMenuCommand,
+		interaction: MessageCommandInteraction | UserCommandInteraction,
+		context: MenuCommandContext<MessageCommandInteraction | UserCommandInteraction>,
+	) {
+		return runContextScopes(this.client.options.contextScopes, context, async () => {
+			try {
+				if (context.guildId && command.botPermissions) {
+					const permissions = await this.checkBotPermissions(command, context, interaction.appPermissions);
+					if (permissions) return await command.onBotPermissionsFail?.(context, permissions);
+				}
+
+				await command.onBeforeMiddlewares?.(context);
+				await runPluginCommandObservers(this.client, 'onBeforeMiddlewares', context);
+				const resultGlobal = await this.runGlobalMiddlewares(command, context);
+				if (typeof resultGlobal === 'boolean') return;
+				const resultMiddle = await this.runMiddlewares(command, context);
+				if (typeof resultMiddle === 'boolean') return;
+
+				try {
+					await command.run!(context);
+					await command.onAfterRun?.(context, undefined);
+					await runPluginCommandObservers(this.client, 'onAfterRun', context, undefined);
+				} catch (error) {
+					await command.onRunError?.(context, error);
+					await runPluginCommandObservers(this.client, 'onRunError', context, error);
+					await command.onAfterRun?.(context, error);
+					await runPluginCommandObservers(this.client, 'onAfterRun', context, error);
+				}
+			} catch (error) {
+				try {
+					await command.onInternalError?.(this.client, command, error);
+					await runPluginCommandObservers(this.client, 'onInternalError', this.client, command, error);
+				} catch (err) {
+					this.client.logger.error(`[${command.name}] Internal error:`, err);
+				}
+			}
+		});
+	}
+
+	contextMenuMessage(
+		command: ContextMenuCommand,
+		interaction: MessageCommandInteraction,
+		context: MenuCommandContext<MessageCommandInteraction>,
+	) {
+		return this.contextMenu(command, interaction, context);
+	}
+
+	contextMenuUser(
+		command: ContextMenuCommand,
+		interaction: UserCommandInteraction,
+		context: MenuCommandContext<UserCommandInteraction>,
+	) {
+		return this.contextMenu(command, interaction, context);
+	}
+
+	async entryPoint(command: EntryPointCommand, interaction: EntryPointInteraction, context: EntryPointContext) {
+		return runContextScopes(this.client.options.contextScopes, context, async () => {
+			try {
+				if (context.guildId && command.botPermissions) {
+					const permissions = await this.checkBotPermissions(command, context, interaction.appPermissions);
+					if (permissions) return await command.onBotPermissionsFail(context, permissions);
+				}
+
+				await command.onBeforeMiddlewares?.(context);
+				await runPluginCommandObservers(this.client, 'onBeforeMiddlewares', context);
+				const resultGlobal = await this.runGlobalMiddlewares(command, context);
+				if (typeof resultGlobal === 'boolean') return;
+				const resultMiddle = await this.runMiddlewares(command, context);
+				if (typeof resultMiddle === 'boolean') return;
+
+				try {
+					await command.run!(context);
+					await command.onAfterRun?.(context, undefined);
+					await runPluginCommandObservers(this.client, 'onAfterRun', context, undefined);
+				} catch (error) {
+					await command.onRunError(context, error);
+					await runPluginCommandObservers(this.client, 'onRunError', context, error);
+					await command.onAfterRun?.(context, error);
+					await runPluginCommandObservers(this.client, 'onAfterRun', context, error);
+				}
+			} catch (error) {
+				try {
+					await command.onInternalError(this.client, command, error);
+					await runPluginCommandObservers(this.client, 'onInternalError', this.client, command, error);
+				} catch (err) {
+					this.client.logger.error(`[${command.name}] Internal error:`, err);
+				}
+			}
+		});
+	}
+
+	async chatInput(
+		command: Command | SubCommand,
+		interaction: ChatInputCommandInteraction,
+		resolver: OptionResolverStructure,
+		context: CommandContext,
+	) {
+		return runContextScopes(this.client.options.contextScopes, context, async () => {
+			try {
+				if (context.guildId) {
+					if (command.botPermissions) {
+						const permissions = await this.checkBotPermissions(command, context, interaction.appPermissions);
+						if (permissions) return await command.onBotPermissionsFail?.(context, permissions);
+					}
+
+					if (command.defaultMemberPermissions) {
+						const permissions = await this.checkMemberPermissions(command, context, interaction.member!.permissions);
+						if (permissions) return await command.onPermissionsFail?.(context, permissions);
+					}
+				}
+
+				await command.onBeforeOptions?.(context);
+				await runPluginCommandObservers(this.client, 'onBeforeOptions', context);
+				if (!(await this.runOptions(command, context, resolver))) return;
+
+				await command.onBeforeMiddlewares?.(context);
+				await runPluginCommandObservers(this.client, 'onBeforeMiddlewares', context);
+				const resultGlobal = await this.runGlobalMiddlewares(command, context);
+				if (typeof resultGlobal === 'boolean') return;
+				const resultMiddle = await this.runMiddlewares(command, context);
+				if (typeof resultMiddle === 'boolean') return;
+
+				try {
+					await command.run!(context);
+					await command.onAfterRun?.(context, undefined);
+					await runPluginCommandObservers(this.client, 'onAfterRun', context, undefined);
+				} catch (error) {
+					await command.onRunError?.(context, error);
+					await runPluginCommandObservers(this.client, 'onRunError', context, error);
+					await command.onAfterRun?.(context, error);
+					await runPluginCommandObservers(this.client, 'onAfterRun', context, error);
+				}
+			} catch (error) {
+				try {
+					await command.onInternalError?.(this.client, command, error);
+					await runPluginCommandObservers(this.client, 'onInternalError', this.client, command, error);
+				} catch (err) {
+					this.client.logger.error(`[${command.name}] Internal error:`, err);
+				}
+			}
+		});
+	}
+
+	async modal(interaction: ModalSubmitInteraction) {
+		const context = new ModalContext(this.client, interaction);
+		const extended = this.client.options?.context?.(interaction) ?? {};
+		Object.assign(context, extended);
+		await this.client.components.executeModal(context);
+	}
+
+	async messageComponent(interaction: ComponentInteraction) {
+		//@ts-expect-error
+		const context = new ComponentContext(this.client, interaction);
+		const extended = this.client.options?.context?.(interaction) ?? {};
+		Object.assign(context, extended);
+		await this.client.components.executeComponent(context);
+	}
+
+	async interaction(body: APIInteraction, shardId: number, __reply?: __InternalReplyFunction) {
+		this.client.debugger?.debug(`[${InteractionType[body.type] ?? body.type}] Interaction received.`);
+		switch (body.type) {
+			case InteractionType.ApplicationCommandAutocomplete:
+				{
+					const optionsResolver = this.makeResolver(
+						this.client,
+						body.data.options ?? [],
+						this.getCommand<Command>(body.data),
+						body.guild_id,
+						body.data.resolved as ContextOptionsResolved,
+					);
+					const interaction = new AutocompleteInteraction(this.client, body, optionsResolver, __reply);
+					const command = optionsResolver.getAutocomplete();
+					await this.autocomplete(interaction, optionsResolver, command);
+				}
+				break;
+			case InteractionType.ApplicationCommand: {
+				switch (body.data.type) {
+					case ApplicationCommandType.Message: {
+						const data = this.makeMenuCommand(body, shardId, __reply);
+						if (!data) return;
+						await this.contextMenuMessage(
+							data.command,
+							data.interaction as MessageCommandInteraction,
+							data.context as MenuCommandContext<MessageCommandInteraction>,
+						);
+						break;
+					}
+					case ApplicationCommandType.User: {
+						const data = this.makeMenuCommand(body, shardId, __reply);
+						if (!data) return;
+						await this.contextMenuUser(
+							data.command,
+							data.interaction as UserCommandInteraction,
+							data.context as MenuCommandContext<UserCommandInteraction>,
+						);
+						break;
+					}
+					case ApplicationCommandType.PrimaryEntryPoint: {
+						const command = this.client.commands.entryPoint;
+						if (!command?.run) return;
+						const interaction = BaseInteraction.from(this.client, body, __reply) as EntryPointInteraction;
+						const context = new EntryPointContext(this.client, interaction, shardId, command);
+						const extendContext = this.client.options?.context?.(interaction) ?? {};
+						Object.assign(context, extendContext);
+						await this.entryPoint(command, interaction, context);
+						break;
+					}
+					case ApplicationCommandType.ChatInput: {
+						const parentCommand = this.getCommand<Command>(body.data);
+						const optionsResolver = this.makeResolver(
+							this.client,
+							body.data.options ?? [],
+							parentCommand,
+							body.guild_id,
+							body.data.resolved as ContextOptionsResolved,
+						);
+						const command = optionsResolver.getCommand();
+						if (!command?.run)
+							return this.client.logger.warn(`${optionsResolver.fullCommandName} command does not have 'run' callback`);
+						const interaction = BaseInteraction.from(this.client, body, __reply) as ChatInputCommandInteraction;
+						const context = new CommandContext(this.client, interaction, optionsResolver, shardId, command);
+						const extendContext = this.client.options?.context?.(interaction) ?? {};
+						Object.assign(context, extendContext);
+						await this.chatInput(command, interaction, optionsResolver, context);
+						break;
+					}
+				}
+				break;
+			}
+			case InteractionType.ModalSubmit:
+				{
+					const interaction = BaseInteraction.from(this.client, body, __reply) as ModalSubmitInteraction;
+					if (this.client.components.hasModal(interaction)) {
+						await this.client.components.onModalSubmit(interaction);
+					} else await this.modal(interaction);
+				}
+				break;
+			case InteractionType.MessageComponent:
+				{
+					const interaction = BaseInteraction.from(this.client, body, __reply) as ComponentInteraction;
+					if (this.client.components.hasComponent(body.message.id, interaction.customId)) {
+						await this.client.components.onComponent(body.message.id, interaction);
+					} else await this.messageComponent(interaction);
+				}
+				break;
+		}
+	}
+
+	async message(rawMessage: GatewayMessageCreateDispatchData, shardId: number) {
+		const self = this.client as Client | WorkerClient;
+		if (!self.options.commands?.prefix) return;
+		const message = Transformers.Message(this.client, rawMessage);
+		const prefixes = (await self.options.commands.prefix(message)).sort((a, b) => b.length - a.length);
+		const prefix = prefixes.find(x => rawMessage.content.startsWith(x));
+
+		if (!(prefix !== undefined && rawMessage.content.startsWith(prefix))) return;
+
+		const content = rawMessage.content.slice(prefix.length).trimStart();
+
+		const { fullCommandName, command, parent, argsContent } = this.resolveCommandFromContent(
+			content,
+			prefix,
+			rawMessage,
+		);
+
+		if (!command || argsContent === undefined) return;
+		if (!command.run) return self.logger.warn(`${fullCommandName} command does not have 'run' callback`);
+
+		if (!(command.contexts.includes(InteractionContextType.BotDM) || rawMessage.guild_id)) return;
+		if (!command.contexts.includes(InteractionContextType.Guild) && rawMessage.guild_id) return;
+		if (command.guildId && !command.guildId?.includes(rawMessage.guild_id!)) return;
+
+		const resolved: MakeRequired<ContextOptionsResolved> = {
+			channels: {},
+			roles: {},
+			users: {},
+			members: {},
+			attachments: {},
+		};
+
+		try {
+			const args = this.argsParser(argsContent, command, message);
+			const { options, errors } = await this.argsOptionsParser(command, rawMessage, args, resolved);
+			const resolverOptions: APIApplicationCommandInteractionDataOption[] =
+				command instanceof SubCommand
+					? [
+							command.group
+								? {
+										type: ApplicationCommandOptionType.SubcommandGroup,
+										name: command.group,
+										options: [{ type: ApplicationCommandOptionType.Subcommand, name: command.name, options }],
+									}
+								: { type: ApplicationCommandOptionType.Subcommand, name: command.name, options },
+						]
+					: options;
+			const optionsResolver = this.makeResolver(
+				self,
+				resolverOptions,
+				parent as Command,
+				rawMessage.guild_id,
+				resolved,
+			);
+			const context = new CommandContext(self, message, optionsResolver, shardId, command);
+			//@ts-expect-error
+			const extendContext = self.options?.context?.(message) ?? {};
+			Object.assign(context, extendContext);
+
+			return await runContextScopes(self.options.contextScopes, context, async () => {
+				if (errors.length) {
+					return await command.onOptionsError?.(
+						context,
+						Object.fromEntries(
+							errors.map(x => {
+								return [
+									x.name,
+									{
+										failed: true,
+										value: x.error,
+										parseError: x.fullError,
+									},
+								];
+							}),
+						),
+					);
+				}
+
+				if (rawMessage.guild_id) {
+					if (command.defaultMemberPermissions) {
+						const memberPermissions = await self.members.permissions(rawMessage.guild_id, rawMessage.author.id);
+						const permissions = await this.checkMemberPermissions(command, context, memberPermissions);
+						const guild = await this.client.guilds.raw(rawMessage.guild_id);
+						if (permissions && guild.owner_id !== rawMessage.author.id) {
+							return await command.onPermissionsFail?.(context, permissions);
+						}
+					}
+
+					if (command.botPermissions) {
+						const appPermissions = await self.members.permissions(rawMessage.guild_id, self.botId);
+						const permissions = await this.checkBotPermissions(command, context, appPermissions);
+						if (permissions) {
+							return await command.onBotPermissionsFail?.(context, permissions);
+						}
+					}
+				}
+
+				await command.onBeforeOptions?.(context);
+				await runPluginCommandObservers(this.client, 'onBeforeOptions', context);
+				if (!(await this.runOptions(command, context, optionsResolver))) return;
+
+				await command.onBeforeMiddlewares?.(context);
+				await runPluginCommandObservers(this.client, 'onBeforeMiddlewares', context);
+				const resultGlobal = await this.runGlobalMiddlewares(command, context);
+				if (typeof resultGlobal === 'boolean') return;
+				const resultMiddle = await this.runMiddlewares(command, context);
+				if (typeof resultMiddle === 'boolean') return;
+				try {
+					await command.run!(context);
+					await command.onAfterRun?.(context, undefined);
+					await runPluginCommandObservers(this.client, 'onAfterRun', context, undefined);
+				} catch (error) {
+					await command.onRunError?.(context, error);
+					await runPluginCommandObservers(this.client, 'onRunError', context, error);
+					await command.onAfterRun?.(context, error);
+					await runPluginCommandObservers(this.client, 'onAfterRun', context, error);
+				}
+			});
+		} catch (error) {
+			try {
+				await command.onInternalError?.(this.client, command, error);
+				await runPluginCommandObservers(this.client, 'onInternalError', this.client, command, error);
+			} catch (err) {
+				this.client.logger.error(`[${command.name}] Internal error:`, err);
+			}
+		}
+	}
+
+	argsParser(content: string, _command: SubCommand | Command, _message: MessageStructure): Record<string, string> {
+		const args: Record<string, string> = {};
+		for (const i of content.match(/-(.*?)(?=\s-|$)/gs) ?? []) {
+			args[i.slice(1).split(' ')[0]] = i.split(' ').slice(1).join(' ');
+		}
+		return args;
+	}
+
+	resolveCommandFromContent(
+		content: string,
+		_prefix: string,
+		_message: GatewayMessageCreateDispatchData,
+	): CommandFromContent & { argsContent?: string } {
+		const result = this.getCommandFromContent(
+			content
+				.split(' ')
+				.filter(x => x)
+				.slice(0, 3),
+			_message.guild_id,
+		);
+
+		if (!result.command) return result;
+
+		let newContent = content;
+		for (const i of result.fullCommandName.split(' ')) {
+			newContent = newContent.slice(newContent.indexOf(i) + i.length);
+		}
+
+		return {
+			...result,
+			argsContent: newContent.slice(1),
+		};
+	}
+
+	getCommandFromContent(commandRaw: string[], guildId?: string): CommandFromContent {
+		return this.resolveCommandFromNameParts(commandRaw, guildId);
+	}
+
+	/**
+	 * Resolves a message command by its full name.
+	 *
+	 * Guild-scoped commands require a matching `guildId`; without one, they intentionally resolve to `undefined`.
+	 */
+	resolveByName(fullName: string, guildId?: string): CommandFromContent | undefined {
+		const parts = fullName
+			.trim()
+			.split(/\s+/)
+			.filter(x => x)
+			.slice(0, 3);
+		if (!parts.length) return undefined;
+
+		const resolved = this.resolveCommandFromNameParts(parts, guildId, false);
+		return resolved.command ? resolved : undefined;
+	}
+
+	private resolveCommandFromNameParts(
+		commandRaw: string[],
+		guildId?: string,
+		allowFallback = true,
+	): CommandFromContent {
+		const rawParentName = commandRaw[0];
+		const rawGroupName = commandRaw.length === 3 ? commandRaw[1] : undefined;
+		const rawSubcommandName = rawGroupName ? commandRaw[2] : commandRaw[1];
+		const parent = this.getParentMessageCommand(rawParentName, guildId);
+		const fullCommandName = `${rawParentName}${
+			rawGroupName ? ` ${rawGroupName} ${rawSubcommandName}` : `${rawSubcommandName ? ` ${rawSubcommandName}` : ''}`
+		}`;
+
+		if (!(parent instanceof Command)) return { fullCommandName };
+
+		if (rawGroupName && !parent.groups?.[rawGroupName] && !parent.groupsAliases?.[rawGroupName]) {
+			if (!allowFallback) return { fullCommandName };
+			return this.resolveCommandFromNameParts([rawParentName, rawGroupName], guildId);
+		}
+		if (
+			rawSubcommandName &&
+			!parent.options?.some(
+				x => x instanceof SubCommand && (x.name === rawSubcommandName || x.aliases?.includes(rawSubcommandName)),
+			)
+		) {
+			if (!allowFallback) return { fullCommandName };
+			return this.resolveCommandFromNameParts([rawParentName], guildId);
+		}
+
+		const groupName = rawGroupName ? parent.groupsAliases?.[rawGroupName] || rawGroupName : undefined;
+
+		const command =
+			groupName || rawSubcommandName
+				? (parent.options?.find(opt => {
+						if (opt instanceof SubCommand) {
+							if (groupName) {
+								if (opt.group !== groupName) return false;
+							}
+							if (opt.group && !groupName) return false;
+							return rawSubcommandName === opt.name || opt.aliases?.includes(rawSubcommandName);
+						}
+						return false;
+					}) as SubCommand)
+				: parent;
+
+		return {
+			command,
+			fullCommandName,
+			parent,
+		};
+	}
+
+	makeResolver(...args: Parameters<(typeof Transformers)['OptionResolver']>): OptionResolverStructure {
+		return Transformers.OptionResolver(...args);
+	}
+
+	getParentMessageCommand(rawParentName: string, guildId?: string) {
+		return this.client.commands.values.find(
+			x =>
+				(!('ignore' in x) || x.ignore !== IgnoreCommand.Message) &&
+				this.commandCanRunInGuild(x, guildId) &&
+				(x.name === rawParentName || ('aliases' in x ? x.aliases?.includes(rawParentName) : false)),
+		);
+	}
+
+	private commandCanRunInGuild(command: Command | ContextMenuCommand, guildId?: string) {
+		if (!command.guildId?.length) return true;
+		return guildId ? command.guildId.includes(guildId) : false;
+	}
+
+	getCommand<T extends Command | ContextMenuCommand | EntryPointCommand>(data: {
+		guild_id?: string;
+		name: string;
+	}): T | undefined {
+		return this.client.commands.values.find(command => {
+			if (data.guild_id) {
+				return command.guildId?.includes(data.guild_id) && command.name === data.name;
+			}
+			return command.name === data.name;
+		}) as T;
+	}
+
+	/**
+	 * Checks the member permissions required by a command.
+	 *
+	 * @remarks
+	 * This method runs for guild executions when the command declares `defaultMemberPermissions`.
+	 * Override it to customize member permission checks; overrides can return synchronously or asynchronously.
+	 * Thrown errors and rejected promises are routed through the command's internal error handler.
+	 *
+	 * @param command - The command whose member permissions are being checked.
+	 * @param _context - The context of the command execution.
+	 * @param permissions - The permissions currently held by the member.
+	 * @returns The missing permission names, or `undefined` when command execution can continue.
+	 */
+	checkMemberPermissions(
+		command: Command | SubCommand,
+		_context: CommandContext,
+		permissions: PermissionsBitField,
+	): Awaitable<PermissionStrings | undefined> {
+		if (!command.defaultMemberPermissions) return;
+		return this.checkPermissions(permissions, command.defaultMemberPermissions);
+	}
+
+	/**
+	 * Checks the bot permissions required by a command.
+	 *
+	 * @remarks
+	 * This method runs for guild executions when the command declares `botPermissions`.
+	 * Override it to customize bot permission checks; overrides can return synchronously or asynchronously.
+	 * Thrown errors and rejected promises are routed through the command's internal error handler.
+	 *
+	 * @param command - The command whose bot permissions are being checked.
+	 * @param _context - The context of the command execution.
+	 * @param permissions - The permissions currently held by the bot.
+	 * @returns The missing permission names, or `undefined` when command execution can continue.
+	 */
+	checkBotPermissions(
+		command: Command | SubCommand | ContextMenuCommand | EntryPointCommand,
+		_context: CommandContext | MenuCommandContext<any> | EntryPointContext,
+		permissions: PermissionsBitField,
+	): Awaitable<PermissionStrings | undefined> {
+		if (!command.botPermissions) return;
+		return this.checkPermissions(permissions, command.botPermissions);
+	}
+
+	checkPermissions(app: PermissionsBitField, bot: bigint) {
+		if (app.has(['Administrator'])) return;
+
+		const permissions = app.missings(app.values([bot]));
+		if (permissions.length) {
+			return app.keys(permissions);
+		}
+		return;
+	}
+
+	fetchChannel(_option: CommandOptionWithType, query: string) {
+		const id = query.match(/[0-9]{17,19}/g)?.[0];
+		if (id) return this.client.channels.raw(id);
+		return null;
+	}
+
+	fetchUser(_option: CommandOptionWithType, query: string) {
+		const id = query.match(/[0-9]{17,19}/g)?.[0];
+		if (id) return this.client.users.raw(id);
+		return null;
+	}
+
+	async fetchMember(_option: CommandOptionWithType, query: string, guildId: string): Promise<APIGuildMember | null> {
+		const id = query.match(/[0-9]{17,19}/g)?.[0];
+		if (!id) return null;
+
+		try {
+			return await this.client.members.raw(guildId, id);
+		} catch (error) {
+			const response = SeyfertError.is(error) ? error.metadata?.response : undefined;
+			if (
+				typeof response === 'object' &&
+				response !== null &&
+				'code' in response &&
+				[RESTJSONErrorCodes.UnknownMember, RESTJSONErrorCodes.UnknownUser].includes(response.code as RESTJSONErrorCodes)
+			) {
+				return null;
+			}
+			throw error;
+		}
+	}
+
+	fetchRole(_option: CommandOptionWithType, query: string, guildId?: string) {
+		const id = query.match(/[0-9]{17,19}/g)?.[0];
+		if (id && guildId) return this.client.roles.raw(guildId, id);
+		return null;
+	}
+
+	async runGlobalMiddlewares(
+		command: Command | ContextMenuCommand | SubCommand | EntryPointCommand,
+		context: CommandContext<{}, never> | MenuCommandContext<any> | EntryPointContext,
+	) {
+		try {
+			const resultRunGlobalMiddlewares = await BaseCommand.__runMiddlewares(
+				context,
+				(this.client.options?.globalMiddlewares ?? []) as readonly (keyof ResolvedRegisteredMiddlewares)[],
+				true,
+			);
+			if (resultRunGlobalMiddlewares.pass) {
+				return false;
+			}
+			if ('error' in resultRunGlobalMiddlewares) {
+				const metadata = resultRunGlobalMiddlewares.metadata ?? { middleware: 'unknown', scope: 'global' as const };
+				await command.onMiddlewaresError?.(
+					context as never,
+					resultRunGlobalMiddlewares.error ?? 'Unknown error',
+					metadata,
+				);
+				await runPluginCommandObservers(
+					this.client,
+					'onMiddlewaresError',
+					context as never,
+					resultRunGlobalMiddlewares.error ?? 'Unknown error',
+					metadata,
+				);
+				return false;
+			}
+			return resultRunGlobalMiddlewares;
+		} catch (e) {
+			try {
+				await command.onInternalError?.(this.client, command as never, e);
+				await runPluginCommandObservers(this.client, 'onInternalError', this.client, command as never, e);
+			} catch (err) {
+				this.client.logger.error(`[${command.name}] Internal error:`, err);
+			}
+		}
+		return false;
+	}
+
+	async runMiddlewares(
+		command: Command | ContextMenuCommand | SubCommand | EntryPointCommand,
+		context: CommandContext<{}, never> | MenuCommandContext<any> | EntryPointContext,
+	) {
+		try {
+			const resultRunMiddlewares = await BaseCommand.__runMiddlewares(context, command.middlewares, false);
+			if (resultRunMiddlewares.pass) {
+				return false;
+			}
+			if ('error' in resultRunMiddlewares) {
+				const metadata = resultRunMiddlewares.metadata ?? { middleware: 'unknown', scope: 'command' as const };
+				await command.onMiddlewaresError?.(context as never, resultRunMiddlewares.error ?? 'Unknown error', metadata);
+				await runPluginCommandObservers(
+					this.client,
+					'onMiddlewaresError',
+					context as never,
+					resultRunMiddlewares.error ?? 'Unknown error',
+					metadata,
+				);
+				return false;
+			}
+			return resultRunMiddlewares;
+		} catch (e) {
+			try {
+				await command.onInternalError?.(this.client, command as never, e);
+				await runPluginCommandObservers(this.client, 'onInternalError', this.client, command as never, e);
+			} catch (err) {
+				this.client.logger.error(`[${command.name}] Internal error:`, err);
+			}
+		}
+		return false;
+	}
+
+	makeMenuCommand(body: APIApplicationCommandInteraction, shardId: number, __reply?: __InternalReplyFunction) {
+		const command = this.getCommand<ContextMenuCommand>(body.data);
+		const interaction = BaseInteraction.from(this.client, body, __reply) as
+			| UserCommandInteraction
+			| MessageCommandInteraction;
+		// idc, is a YOU problem
+		if (!command?.run)
+			return this.client.logger.warn(`${command?.name ?? 'Unknown'} command does not have 'run' callback`);
+		const context = new MenuCommandContext(this.client, interaction, shardId, command);
+		const extendContext = this.client.options?.context?.(interaction) ?? {};
+		Object.assign(context, extendContext);
+
+		return { command, interaction, context };
+	}
+
+	async runOptions(command: Command | SubCommand, context: CommandContext, resolver: OptionResolverStructure) {
+		const [erroredOptions, result] = await command.__runOptions(context, resolver);
+		if (erroredOptions) {
+			await command.onOptionsError?.(context, result);
+			return false;
+		}
+		return true;
+	}
+
+	async argsOptionsParser(
+		command: Command | SubCommand,
+		message: GatewayMessageCreateDispatchData,
+		args: Record<string, string>,
+		resolved: MakeRequired<ContextOptionsResolved>,
+	) {
+		const options: APIApplicationCommandInteractionDataBasicOption[] = [];
+		const errors: {
+			name: string;
+			error: string;
+			fullError: MessageCommandOptionErrors;
+		}[] = [];
+		let indexAttachment = -1;
+		for (const i of (command.options ?? []) as (CommandOption & {
+			type: ApplicationCommandOptionType;
+		})[]) {
+			try {
+				if (!args[i.name] && i.type !== ApplicationCommandOptionType.Attachment) continue;
+				let value: string | boolean | number | undefined;
+				switch (i.type) {
+					case ApplicationCommandOptionType.Attachment:
+						if (message.attachments[++indexAttachment]) {
+							value = message.attachments[indexAttachment].id;
+							resolved.attachments[value] = message.attachments[indexAttachment];
+						}
+						break;
+					case ApplicationCommandOptionType.Boolean:
+						value = ['yes', 'y', 'true', 'treu'].includes(args[i.name].toLowerCase());
+						break;
+					case ApplicationCommandOptionType.Channel:
+						{
+							const rawQuery =
+								message.content.match(/(?<=<#)[0-9]{17,19}(?=>)/g)?.find(x => args[i.name]?.includes(x)) ||
+								args[i.name];
+							if (!rawQuery) continue;
+							const channel =
+								(await this.client.cache.channels?.raw(rawQuery)) ?? (await this.fetchChannel(i, rawQuery));
+							if (!channel) break;
+							if ('channel_types' in i) {
+								if (!(i as SeyfertChannelOption).channel_types!.includes(channel.type)) {
+									errors.push({
+										name: i.name,
+										error: `The entered channel type is not one of ${(i as SeyfertChannelOption)
+											.channel_types!.map(t => ChannelType[t])
+											.join(', ')}`,
+										fullError: ['CHANNEL_TYPES', (i as SeyfertChannelOption).channel_types!],
+									});
+									break;
+								}
+							}
+							value = channel.id;
+							//discord funny memoentnt!!!!!!!!
+							resolved.channels[channel.id] = channel as APIInteractionDataResolvedChannel;
+						}
+						break;
+					case ApplicationCommandOptionType.Mentionable:
+						{
+							const matches = args[i.name]?.match(/<@[0-9]{17,19}(?=>)|<@&[0-9]{17,19}(?=>)/g) ?? [];
+							for (const match of matches) {
+								if (match.includes('&')) {
+									const rawId = match.slice(3);
+									if (rawId) {
+										const role =
+											(await this.client.cache.roles?.raw(rawId)) ?? (await this.fetchRole(i, rawId, message.guild_id));
+										if (role) {
+											value = rawId;
+											resolved.roles[rawId] = role;
+											break;
+										}
+									}
+								} else {
+									const rawId = match.slice(2);
+									const raw = message.mentions.find(x => rawId === x.id);
+									if (raw) {
+										const { member, ...user } = raw;
+										value = raw.id;
+										resolved.users[raw.id] = user;
+										if (member) resolved.members[raw.id] = member;
+										break;
+									}
+								}
+							}
+						}
+						break;
+					case ApplicationCommandOptionType.Role:
+						{
+							const rawQuery = message.mention_roles.find(x => args[i.name]?.includes(x)) || args[i.name];
+							if (!rawQuery) continue;
+							const role =
+								(await this.client.cache.roles?.raw(rawQuery)) ?? (await this.fetchRole(i, rawQuery, message.guild_id));
+							if (role) {
+								value = role.id;
+								resolved.roles[role.id] = role;
+							}
+						}
+						break;
+					case ApplicationCommandOptionType.User:
+						{
+							const rawQuery = message.mentions.find(x => args[i.name]?.includes(x.id))?.id || args[i.name];
+							if (!rawQuery) continue;
+							const raw =
+								message.mentions.find(x => args[i.name]?.includes(x.id)) ??
+								(await this.client.cache.users?.raw(rawQuery)) ??
+								(await this.fetchUser(i, rawQuery));
+							if (raw) {
+								value = raw.id;
+								resolved.users[raw.id] = raw;
+								if (message.guild_id) {
+									const member =
+										message.mentions.find(x => args[i.name]?.includes(x.id))?.member ??
+										(await this.client.cache.members?.raw(value, message.guild_id)) ??
+										(await this.fetchMember(i, value, message.guild_id));
+									if (member) resolved.members[value] = member;
+								}
+							}
+						}
+						break;
+					case ApplicationCommandOptionType.String:
+						{
+							const option = i as SeyfertStringOption;
+							if (option.choices?.length) {
+								const choice = option.choices.find(x => x.name === args[i.name]);
+								if (!choice) {
+									errors.push({
+										name: i.name,
+										error: `The entered choice is invalid. Please choose one of the following options: ${option.choices
+											.map(x => x.name)
+											.join(', ')}`,
+										fullError: ['STRING_INVALID_CHOICE', option.choices],
+									});
+									break;
+								}
+								value = choice.value;
+								break;
+							}
+							if (option.min_length !== undefined) {
+								if (args[i.name].length < option.min_length) {
+									errors.push({
+										name: i.name,
+										error: `The entered string has less than ${option.min_length} characters. The minimum required is ${option.min_length} characters`,
+										fullError: ['STRING_MIN_LENGTH', option.min_length],
+									});
+									break;
+								}
+							}
+							if (option.max_length !== undefined) {
+								if (args[i.name].length > option.max_length) {
+									errors.push({
+										name: i.name,
+										error: `The entered string has more than ${option.max_length} characters. The maximum required is ${option.max_length} characters`,
+										fullError: ['STRING_MAX_LENGTH', option.max_length],
+									});
+									break;
+								}
+							}
+							value = args[i.name];
+						}
+						break;
+					case ApplicationCommandOptionType.Number:
+					case ApplicationCommandOptionType.Integer:
+						{
+							const option = i as SeyfertNumberOption | SeyfertIntegerOption;
+							if (option.choices?.length) {
+								const choice = option.choices.find(x => x.name === args[i.name]);
+								if (!choice) {
+									errors.push({
+										name: i.name,
+										error: `The entered choice is invalid. Please choose one of the following options: ${option.choices
+											.map(x => x.name)
+											.join(', ')}`,
+										fullError: ['NUMBER_INVALID_CHOICE', option.choices],
+									});
+									break;
+								}
+								value = choice.value;
+								break;
+							}
+							value =
+								i.type === ApplicationCommandOptionType.Integer
+									? Math.trunc(Number(args[i.name]))
+									: Number(args[i.name]);
+							if (Number.isNaN(value)) {
+								value = undefined;
+								errors.push({
+									name: i.name,
+									error: 'The entered choice is an invalid number',
+									fullError: ['NUMBER_NAN', args[i.name]],
+								});
+								break;
+							}
+							if (value <= -INTEGER_OPTION_VALUE_LIMIT || value >= INTEGER_OPTION_VALUE_LIMIT) {
+								value = undefined;
+								errors.push({
+									name: i.name,
+									error: 'The entered number must be between -2^53 and 2^53',
+									fullError: ['NUMBER_OUT_OF_BOUNDS', INTEGER_OPTION_VALUE_LIMIT],
+								});
+								break;
+							}
+							if (option.min_value !== undefined) {
+								if (value < option.min_value) {
+									value = undefined;
+									errors.push({
+										name: i.name,
+										error: `The entered number is less than ${option.min_value}. The minimum allowed is ${option.min_value}`,
+										fullError: ['NUMBER_MIN_VALUE', option.min_value],
+									});
+									break;
+								}
+							}
+							if (option.max_value !== undefined) {
+								if (value > option.max_value) {
+									value = undefined;
+									errors.push({
+										name: i.name,
+										error: `The entered number is greater than ${option.max_value}. The maximum allowed is ${option.max_value}`,
+										fullError: ['NUMBER_MAX_VALUE', option.max_value],
+									});
+									break;
+								}
+							}
+						}
+						break;
+				}
+				if (value !== undefined) {
+					options.push({
+						name: i.name,
+						type: i.type,
+						value,
+					} as APIApplicationCommandInteractionDataBasicOption);
+				} else if (i.required)
+					if (!errors.some(x => x.name === i.name))
+						errors.push({
+							error: 'Option is required but returned undefined',
+							name: i.name,
+							fullError: ['OPTION_REQUIRED'],
+						});
+			} catch (e) {
+				errors.push({
+					error: e && typeof e === 'object' && 'message' in e ? (e.message as string) : `${e}`,
+					name: i.name,
+					fullError: ['UNKNOWN', e],
+				});
+			}
+		}
+
+		return { errors, options };
+	}
+}

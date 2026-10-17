@@ -1,16 +1,20 @@
-import type {
-	APIThreadMember,
-	RESTGetAPIChannelThreadMembersQuery,
-	RESTGetAPIChannelThreadsArchivedQuery,
-	RESTPatchAPIChannelJSONBody,
-	RESTPostAPIChannelMessagesThreadsJSONBody,
-	RESTPostAPIChannelThreadsJSONBody,
-	RESTPostAPIGuildForumThreadsJSONBody,
-} from 'discord-api-types/v10';
-import type { ThreadChannel } from '../../structures';
-import channelFrom from '../../structures/channels';
-import { BaseShorter } from './base';
+import { CacheFrom, resolveFiles } from '../..';
+import type { ThreadChannelStructure } from '../../client/transformers';
+import { channelFrom, MessagesMethods } from '../../structures';
+import {
+	type APIChannel,
+	type APIThreadChannel,
+	type APIThreadMember,
+	ChannelType,
+	type RESTGetAPIChannelThreadMembersQuery,
+	type RESTGetAPIChannelThreadsArchivedQuery,
+	type RESTPatchAPIChannelJSONBody,
+	type RESTPostAPIChannelMessagesThreadsJSONBody,
+	type RESTPostAPIGuildForumThreadsJSONBody,
+} from '../../types';
 import type { MakeRequired, When } from '../types/util';
+import type { ThreadCreateBodyRequest } from '../types/write';
+import { BaseShorter } from './base';
 
 export class ThreadShorter extends BaseShorter {
 	/**
@@ -19,55 +23,78 @@ export class ThreadShorter extends BaseShorter {
 	 * @param reason The reason for unpinning the message.
 	 * @returns A promise that resolves when the thread is succesfully created.
 	 */
-	async create(
-		channelId: string,
-		body: RESTPostAPIChannelThreadsJSONBody | RESTPostAPIGuildForumThreadsJSONBody,
-		reason?: string,
-	) {
-		return (
-			this.client.proxy
-				.channels(channelId)
-				.threads.post({ body, reason })
-				// When testing this, discord returns the thread object, but in discord api types it does not.
-				.then(thread => channelFrom(thread, this.client) as ThreadChannel)
+	async create(channelId: string, body: ThreadCreateBodyRequest, reason?: string): Promise<ThreadChannelStructure> {
+		let thread: APIChannel;
+		if ('message' in body || 'files' in body) {
+			const { message, files, ...rest } = body;
+			const parsedFiles = files ? await resolveFiles(files) : undefined;
+
+			const transformedBody = MessagesMethods.transformMessageBody<RESTPostAPIGuildForumThreadsJSONBody['message']>(
+				message ?? {},
+				files,
+				this.client,
+			);
+
+			thread = await this.client.proxy.channels(channelId).threads.post({
+				body: {
+					...rest,
+					message: transformedBody,
+				},
+				files: parsedFiles,
+				reason,
+			});
+		} else thread = await this.client.proxy.channels(channelId).threads.post({ body, reason });
+
+		await this.client.cache.channels?.setIfNI(
+			CacheFrom.Rest,
+			'Guilds',
+			thread.id,
+			(thread as APIThreadChannel).guild_id!,
+			thread,
 		);
+
+		return channelFrom(thread, this.client) as ThreadChannelStructure;
 	}
 
 	async fromMessage(
 		channelId: string,
 		messageId: string,
 		options: RESTPostAPIChannelMessagesThreadsJSONBody & { reason?: string },
-	) {
+	): Promise<ThreadChannelStructure> {
 		const { reason, ...body } = options;
 
-		return this.client.proxy
-			.channels(channelId)
-			.messages(messageId)
-			.threads.post({ body, reason })
-			.then(thread => channelFrom(thread, this.client) as ThreadChannel);
+		const thread = await this.client.proxy.channels(channelId).messages(messageId).threads.post({ body, reason });
+		await this.client.cache.channels?.setIfNI(
+			CacheFrom.Rest,
+			'Guilds',
+			thread.id,
+			(thread as APIThreadChannel).guild_id!,
+			thread,
+		);
+		return await (channelFrom(thread, this.client) as ThreadChannelStructure);
 	}
 
-	async join(threadId: string) {
+	join(threadId: string) {
 		return this.client.proxy.channels(threadId)['thread-members']('@me').put();
 	}
 
-	async leave(threadId: string) {
+	leave(threadId: string) {
 		return this.client.proxy.channels(threadId)['thread-members']('@me').delete();
 	}
 
-	async lock(threadId: string, locked = true, reason?: string) {
-		return this.edit(threadId, { locked }, reason).then(x => channelFrom(x, this.client) as ThreadChannel);
+	async lock(threadId: string, locked = true, reason?: string): Promise<ThreadChannelStructure> {
+		return this.edit(threadId, { locked }, reason);
 	}
 
-	async edit(threadId: string, body: RESTPatchAPIChannelJSONBody, reason?: string) {
-		return this.client.channels.edit(threadId, body, { reason });
+	async edit(threadId: string, body: RESTPatchAPIChannelJSONBody, reason?: string): Promise<ThreadChannelStructure> {
+		return (await this.client.channels.edit(threadId, body, { reason })) as ThreadChannelStructure;
 	}
 
-	async removeMember(threadId: string, memberId: string) {
+	removeMember(threadId: string, memberId: string) {
 		return this.client.proxy.channels(threadId)['thread-members'](memberId).delete();
 	}
 
-	async fetchMember<WithMember extends boolean = false>(
+	fetchMember<WithMember extends boolean = false>(
 		threadId: string,
 		memberId: string,
 		with_member: WithMember,
@@ -79,35 +106,65 @@ export class ThreadShorter extends BaseShorter {
 		}) as never;
 	}
 
-	async addMember(threadId: string, memberId: string) {
+	addMember(threadId: string, memberId: string) {
 		return this.client.proxy.channels(threadId)['thread-members'](memberId).put();
 	}
 
-	async listMembers<T extends RESTGetAPIChannelThreadMembersQuery = RESTGetAPIChannelThreadMembersQuery>(
+	listMembers<T extends RESTGetAPIChannelThreadMembersQuery = RESTGetAPIChannelThreadMembersQuery>(
 		threadId: string,
 		query?: T,
 	): Promise<InferWithMemberOnList<T>> {
 		return this.client.proxy.channels(threadId)['thread-members'].get({ query }) as never;
 	}
 
-	async listArchivedThreads(
+	async listArchived(
 		channelId: string,
 		type: 'public' | 'private',
 		query?: RESTGetAPIChannelThreadsArchivedQuery,
-	) {
+	): Promise<{
+		threads: ThreadChannelStructure[];
+		members: GetAPIChannelThreadMemberResult[];
+		hasMore: boolean;
+	}> {
 		const data = await this.client.proxy.channels(channelId).threads.archived[type].get({ query });
 
 		return {
-			threads: data.threads.map(thread => channelFrom(thread, this.client) as ThreadChannel),
+			threads: data.threads.map(thread => channelFrom(thread, this.client) as ThreadChannelStructure),
 			members: data.members as GetAPIChannelThreadMemberResult[],
 			hasMore: data.has_more,
 		};
 	}
 
-	async listJoinedArchivedPrivate(channelId: string, query?: RESTGetAPIChannelThreadsArchivedQuery) {
+	async listGuildActive(guildId: string, force = false): Promise<ThreadChannelStructure[]> {
+		if (!force) {
+			const cached = await this.client.cache.channels?.valuesRaw(guildId);
+			if (cached)
+				return cached
+					.filter(x =>
+						[ChannelType.PublicThread, ChannelType.PrivateThread, ChannelType.AnnouncementThread].includes(x.type),
+					)
+					.map(x => channelFrom(x, this.client) as ThreadChannelStructure);
+		}
+		const data = await this.client.proxy.guilds(guildId).threads.active.get();
+		return Promise.all(
+			data.threads.map(async thread => {
+				await this.client.cache.channels?.setIfNI(CacheFrom.Rest, 'Guilds', thread.id, guildId, thread);
+				return channelFrom(thread, this.client) as ThreadChannelStructure;
+			}),
+		);
+	}
+
+	async listJoinedArchivedPrivate(
+		channelId: string,
+		query?: RESTGetAPIChannelThreadsArchivedQuery,
+	): Promise<{
+		threads: ThreadChannelStructure[];
+		members: GetAPIChannelThreadMemberResult[];
+		hasMore: boolean;
+	}> {
 		const data = await this.client.proxy.channels(channelId).users('@me').threads.archived.private.get({ query });
 		return {
-			threads: data.threads.map(thread => channelFrom(thread, this.client) as ThreadChannel),
+			threads: data.threads.map(thread => channelFrom(thread, this.client) as ThreadChannelStructure),
 			members: data.members as GetAPIChannelThreadMemberResult[],
 			hasMore: data.has_more,
 		};

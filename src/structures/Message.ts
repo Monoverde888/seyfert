@@ -1,3 +1,27 @@
+import type { ValidAnswerId } from '../api/Routes/channels';
+import type { ListenerOptions } from '../builders';
+import { Embed } from '../builders/Embed';
+import type { ReturnCache } from '../cache';
+import {
+	type GuildMemberStructure,
+	type GuildStructure,
+	type MessageStructure,
+	type PollStructure,
+	Transformers,
+	type UserStructure,
+	type WebhookMessageStructure,
+	type WebhookStructure,
+} from '../client/transformers';
+import type { UsingClient } from '../commands';
+import { SeyfertError } from '../common/it/error';
+import { Formatter } from '../common/it/formatter';
+import { toCamelCase } from '../common/it/utils';
+import type { EmojiResolvable } from '../common/types/resolvables';
+import type { ObjectToLower } from '../common/types/util';
+import type { MessageCreateBodyRequest, MessageUpdateBodyRequest } from '../common/types/write';
+import type { TopLevelComponents } from '../components';
+import { componentFactory } from '../components';
+import { ContainerComponent } from '../components/Container';
 import type {
 	APIChannelMention,
 	APIEmbed,
@@ -5,20 +29,15 @@ import type {
 	APIMessage,
 	APIUser,
 	GatewayMessageCreateDispatchData,
-} from 'discord-api-types/v10';
-import type { ListenerOptions } from '../builders';
-import type { UsingClient } from '../commands';
-import { toCamelCase, type ObjectToLower } from '../common';
-import type { EmojiResolvable } from '../common/types/resolvables';
-import type { MessageCreateBodyRequest, MessageUpdateBodyRequest } from '../common/types/write';
-import type { ActionRowMessageComponents } from '../components';
-import { MessageActionRowComponent } from '../components/ActionRow';
-import { GuildMember } from './GuildMember';
-import { User } from './User';
-import type { MessageWebhookMethodEditParams, MessageWebhookMethodWriteParams } from './Webhook';
+	TextChannelType,
+} from '../types';
+import type { AllChannels } from './channels';
 import { DiscordBase } from './extra/DiscordBase';
-import { messageLink } from './extra/functions';
-import { Embed, Poll } from '..';
+import type {
+	MessageWebhookMethodEditParams,
+	MessageWebhookMethodWriteParams,
+	MessageWebhookMethodWriteWaitParams,
+} from './Webhook';
 
 export type MessageData = APIMessage | GatewayMessageCreateDispatchData;
 
@@ -27,14 +46,15 @@ export interface BaseMessage
 		ObjectToLower<Omit<MessageData, 'timestamp' | 'author' | 'mentions' | 'components' | 'poll' | 'embeds'>> {
 	timestamp?: number;
 	guildId?: string;
-	author: User;
-	member?: GuildMember;
-	components: MessageActionRowComponent<ActionRowMessageComponents>[];
-	poll?: Poll;
+	channelType?: TextChannelType;
+	author: UserStructure;
+	member?: GuildMemberStructure;
+	components: TopLevelComponents[];
+	poll?: PollStructure;
 	mentions: {
 		roles: string[];
 		channels: APIChannelMention[];
-		users: (GuildMember | User)[];
+		users: (GuildMemberStructure | UserStructure)[];
 	};
 }
 export class BaseMessage extends DiscordBase {
@@ -47,30 +67,53 @@ export class BaseMessage extends DiscordBase {
 			channels: data.mention_channels ?? [],
 			users: [],
 		};
-		this.components = data.components?.map(x => new MessageActionRowComponent(x)) ?? [];
+		this.components = (data.components?.map(componentFactory) as TopLevelComponents[]) ?? [];
 		this.embeds = data.embeds.map(embed => new InMessageEmbed(embed));
 		this.patch(data);
 	}
 
-	get user() {
+	get user(): UserStructure {
 		return this.author;
 	}
 
 	createComponentCollector(options?: ListenerOptions) {
-		return this.client.components!.createComponentCollector(this.id, options);
+		return this.client.components.createComponentCollector(this.id, this.channelId, this.guildId, options);
 	}
 
 	get url() {
-		return messageLink(this.channelId, this.id, this.guildId);
+		return Formatter.messageLink(this.guildId ?? '@me', this.channelId, this.id);
 	}
 
-	guild(force = false) {
-		if (!this.guildId) return;
-		return this.client.guilds.fetch(this.guildId, force);
+	guild(mode?: 'rest' | 'flow'): Promise<GuildStructure<'cached' | 'api'> | undefined>;
+	guild(mode: 'cache'): ReturnCache<GuildStructure<'cached'> | undefined>;
+	guild(mode: 'cache' | 'rest' | 'flow' = 'flow') {
+		if (!this.guildId)
+			return (
+				mode === 'cache' ? (this.client.cache.adapter.isAsync ? Promise.resolve() : undefined) : Promise.resolve()
+			) as any;
+		switch (mode) {
+			case 'cache':
+				return (
+					this.client.cache.guilds?.get(this.guildId) ||
+					(this.client.cache.adapter.isAsync ? (Promise.resolve() as any) : undefined)
+				);
+			default:
+				return this.client.guilds.fetch(this.guildId, mode === 'rest');
+		}
 	}
 
-	async channel(force = false) {
-		return this.client.channels.fetch(this.channelId, force);
+	channel(mode?: 'rest' | 'flow'): Promise<AllChannels>;
+	channel(mode: 'cache'): ReturnCache<AllChannels | undefined>;
+	channel(mode: 'cache' | 'rest' | 'flow' = 'flow') {
+		switch (mode) {
+			case 'cache':
+				return (
+					this.client.cache.channels?.get(this.channelId) ||
+					(this.client.cache.adapter.isAsync ? (Promise.resolve() as any) : undefined)
+				);
+			default:
+				return this.client.channels.fetch(this.channelId, mode === 'rest');
+		}
 	}
 
 	react(emoji: EmojiResolvable) {
@@ -83,32 +126,27 @@ export class BaseMessage extends DiscordBase {
 		}
 
 		if ('author' in data && data.author) {
-			this.author = new User(this.client, data.author);
+			this.author = Transformers.User(this.client, data.author);
 		}
 
 		if ('member' in data && data.member) {
-			this.member = new GuildMember(this.client, data.member, this.author, this.guildId!);
+			this.member = Transformers.GuildMember(this.client, data.member, data.author, this.guildId!);
 		}
 
 		if (data.mentions?.length) {
 			this.mentions.users = this.guildId
-				? data.mentions.map(
-						m =>
-							new GuildMember(
-								this.client,
-								{
-									...(m as APIUser & { member?: Omit<APIGuildMember, 'user'> }).member!,
-									user: m,
-								},
-								m,
-								this.guildId!,
-							),
-					)
-				: data.mentions.map(u => new User(this.client, u));
+				? data.mentions.map(m => {
+						const memberData = (m as APIUser & { member?: Omit<APIGuildMember, 'user'> }).member;
+						if (memberData) {
+							return Transformers.GuildMember(this.client, { ...memberData, user: m }, m, this.guildId!);
+						}
+						return Transformers.User(this.client, m);
+					})
+				: data.mentions.map(u => Transformers.User(this.client, u));
 		}
 
 		if (data.poll) {
-			this.poll = new Poll(this.client, data.poll, this.channelId, this.id);
+			this.poll = Transformers.Poll(this.client, data.poll, this.channelId, this.id);
 		}
 	}
 }
@@ -122,11 +160,11 @@ export class Message extends BaseMessage {
 		super(client, data);
 	}
 
-	fetch() {
-		return this.client.messages.fetch(this.id, this.channelId);
+	fetch(force = false): Promise<MessageStructure> {
+		return this.client.messages.fetch(this.id, this.channelId, force);
 	}
 
-	reply(body: Omit<MessageCreateBodyRequest, 'message_reference'>, fail = true) {
+	reply(body: Omit<MessageCreateBodyRequest, 'message_reference'>, fail = true): Promise<MessageStructure> {
 		return this.write({
 			...body,
 			message_reference: {
@@ -138,11 +176,11 @@ export class Message extends BaseMessage {
 		});
 	}
 
-	edit(body: MessageUpdateBodyRequest) {
+	edit(body: MessageUpdateBodyRequest): Promise<MessageStructure> {
 		return this.client.messages.edit(this.id, this.channelId, body);
 	}
 
-	write(body: MessageCreateBodyRequest) {
+	write(body: MessageCreateBodyRequest): Promise<MessageStructure> {
 		return this.client.messages.write(this.channelId, body);
 	}
 
@@ -150,8 +188,19 @@ export class Message extends BaseMessage {
 		return this.client.messages.delete(this.id, this.channelId, reason);
 	}
 
-	crosspost(reason?: string) {
+	crosspost(reason?: string): Promise<MessageStructure> {
 		return this.client.messages.crosspost(this.id, this.channelId, reason);
+	}
+
+	endPoll(): Promise<MessageStructure> {
+		return this.client.messages.endPoll(this.channelId, this.id);
+	}
+
+	async getAnswerVoters(answerId: ValidAnswerId, checkAnswer = false): Promise<UserStructure[]> {
+		if (checkAnswer && this.poll && !this.poll.answers.find(answer => answer.answerId === answerId)) {
+			throw new SeyfertError('INVALID_ANSWER_ID', { metadata: { detail: 'Invalid answer id' } });
+		}
+		return this.client.messages.getAnswerVoters(this.channelId, this.id, answerId);
 	}
 }
 
@@ -159,6 +208,8 @@ export type EditMessageWebhook = Omit<MessageWebhookMethodEditParams, 'messageId
 	Pick<MessageWebhookMethodEditParams, 'query'>;
 export type WriteMessageWebhook = MessageWebhookMethodWriteParams['body'] &
 	Pick<MessageWebhookMethodWriteParams, 'query'>;
+export type WriteMessageWebhookWait = MessageWebhookMethodWriteWaitParams['body'] &
+	Pick<MessageWebhookMethodWriteWaitParams, 'query'>;
 
 export class WebhookMessage extends BaseMessage {
 	constructor(
@@ -170,11 +221,20 @@ export class WebhookMessage extends BaseMessage {
 		super(client, data);
 	}
 
-	fetch() {
-		return this.api.webhooks(this.webhookId)(this.webhookToken).get({ query: this.thread?.id });
+	fetchWebhook(): Promise<WebhookStructure> {
+		return this.client.webhooks.fetch(this.webhookId, this.webhookToken);
 	}
 
-	edit(body: EditMessageWebhook) {
+	fetch(): Promise<WebhookMessageStructure> {
+		return this.client.webhooks.fetchMessage({
+			messageId: this.id,
+			webhookId: this.webhookId,
+			token: this.webhookToken,
+			query: this.thread?.id ? { thread_id: this.thread.id } : undefined,
+		});
+	}
+
+	edit(body: EditMessageWebhook): Promise<WebhookMessageStructure> {
 		const { query, ...rest } = body;
 		return this.client.webhooks.editMessage(this.webhookId, this.webhookToken, {
 			body: rest,
@@ -183,7 +243,9 @@ export class WebhookMessage extends BaseMessage {
 		});
 	}
 
-	write(body: WriteMessageWebhook) {
+	write(body: WriteMessageWebhookWait): Promise<WebhookMessageStructure>;
+	write(body: WriteMessageWebhook): Promise<WebhookMessageStructure | null>;
+	write(body: WriteMessageWebhook): Promise<WebhookMessageStructure | null> {
 		const { query, ...rest } = body;
 		return this.client.webhooks.writeMessage(this.webhookId, this.webhookToken, {
 			body: rest,
@@ -192,7 +254,13 @@ export class WebhookMessage extends BaseMessage {
 	}
 
 	delete(reason?: string) {
-		return this.client.webhooks.deleteMessage(this.webhookId, this.webhookToken, this.id, reason);
+		return this.client.webhooks.deleteMessage({
+			webhookId: this.webhookId,
+			token: this.webhookToken,
+			messageId: this.id,
+			reason,
+			query: this.thread?.id ? { thread_id: this.thread.id } : undefined,
+		});
 	}
 }
 
@@ -203,9 +271,6 @@ export class InMessageEmbed {
 		return this.data.title;
 	}
 
-	/**
-	 * @deprecated
-	 */
 	get type() {
 		return this.data.type;
 	}
@@ -252,6 +317,11 @@ export class InMessageEmbed {
 
 	get fields() {
 		return this.data.fields;
+	}
+
+	/** Components of a website link preview, when present. */
+	get components() {
+		return this.data.components?.map(component => new ContainerComponent(component));
 	}
 
 	toBuilder() {

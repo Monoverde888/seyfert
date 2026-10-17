@@ -1,10 +1,8 @@
-import type {
-	APITemplate,
-	RESTPatchAPIGuildTemplateJSONBody,
-	RESTPostAPIGuildTemplatesJSONBody,
-} from 'discord-api-types/v10';
+import type { ReturnCache } from '../cache';
+import type { GuildStructure, GuildTemplateStructure } from '../client';
 import type { UsingClient } from '../commands';
 import type { MethodContext, ObjectToLower } from '../common';
+import type { APITemplate, RESTPatchAPIGuildTemplateJSONBody, RESTPostAPIGuildTemplatesJSONBody } from '../types';
 import { Base } from './extra/Base';
 
 export interface GuildTemplate extends Base, ObjectToLower<APITemplate> {}
@@ -15,35 +13,46 @@ export class GuildTemplate extends Base {
 		this.__patchThis(data);
 	}
 
-	guild(force = false) {
-		return this.client.guilds.fetch(this.sourceGuildId, force);
+	guild(mode?: 'rest' | 'flow'): Promise<GuildStructure<'cached' | 'api'>>;
+	guild(mode: 'cache'): ReturnCache<GuildStructure<'cached'> | undefined>;
+	guild(mode: 'cache' | 'rest' | 'flow' = 'flow') {
+		switch (mode) {
+			case 'cache':
+				return (
+					this.client.cache.guilds?.get(this.sourceGuildId) ||
+					(this.client.cache.adapter.isAsync ? (Promise.resolve() as any) : undefined)
+				);
+			default:
+				return this.client.guilds.fetch(this.sourceGuildId, mode === 'rest');
+		}
 	}
 
-	async fetch() {
-		return this.client.templates.fetch(this.sourceGuildId);
+	fetch(): Promise<GuildTemplateStructure> {
+		return this.client.templates.fetch(this.code);
 	}
 
-	sync() {
+	sync(): Promise<GuildTemplateStructure> {
 		return this.client.templates.sync(this.sourceGuildId, this.code);
 	}
 
-	edit(body: RESTPatchAPIGuildTemplateJSONBody) {
+	edit(body: RESTPatchAPIGuildTemplateJSONBody): Promise<GuildTemplateStructure> {
 		return this.client.templates.edit(this.sourceGuildId, this.code, body);
 	}
 
-	delete() {
+	delete(): Promise<GuildTemplateStructure> {
 		return this.client.templates.delete(this.sourceGuildId, this.code);
 	}
 
 	static methods(ctx: MethodContext<{ guildId: string }>) {
 		return {
-			fetch: (code: string) => ctx.client.templates.fetch(code),
-			list: () => ctx.client.templates.list(ctx.guildId),
-			create: (body: RESTPostAPIGuildTemplatesJSONBody) => ctx.client.templates.create(ctx.guildId, body),
-			sync: (code: string) => ctx.client.templates.sync(ctx.guildId, code),
-			edit: (code: string, body: RESTPatchAPIGuildTemplateJSONBody) =>
+			fetch: (code: string): Promise<GuildTemplateStructure> => ctx.client.templates.fetch(code),
+			list: (): Promise<GuildTemplateStructure[]> => ctx.client.templates.list(ctx.guildId),
+			create: (body: RESTPostAPIGuildTemplatesJSONBody): Promise<GuildTemplateStructure> =>
+				ctx.client.templates.create(ctx.guildId, body),
+			sync: (code: string): Promise<GuildTemplateStructure> => ctx.client.templates.sync(ctx.guildId, code),
+			edit: (code: string, body: RESTPatchAPIGuildTemplateJSONBody): Promise<GuildTemplateStructure> =>
 				ctx.client.templates.edit(ctx.guildId, code, body),
-			delete: (code: string) => ctx.client.templates.delete(ctx.guildId, code),
+			delete: (code: string): Promise<GuildTemplateStructure> => ctx.client.templates.delete(ctx.guildId, code),
 		};
 	}
 }

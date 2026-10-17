@@ -1,3 +1,25 @@
+import type { BitFieldResolvable } from '../../structures/extra/BitField';
+import { PermissionsBitField } from '../../structures/extra/Permissions';
+import type { OAuth2Scopes, PermissionFlagsBits } from '../../types';
+
+/**
+ * Represents options for creating a OAuth2 uri
+ */
+export type OAuth2URLOptions = {
+	/**
+	 * Oauth2 scopes to be used.
+	 */
+	scopes: OAuth2Scopes[];
+	/**
+	 * Permissions to be granted to the application.
+	 */
+	permissions?: BitFieldResolvable<typeof PermissionFlagsBits>;
+	/**
+	 * Whether guild select must be disabled in oauth2 interface.
+	 */
+	disableGuildSelect?: boolean;
+};
+
 /**
  * Represents heading levels.
  */
@@ -21,31 +43,48 @@ export enum HeadingLevel {
  */
 export enum TimestampStyle {
 	/**
-	 * Represents a short timestamp style.
+	 * Represents a short time format. (t)
+	 * @example `16:20`
 	 */
 	ShortTime = 't',
 	/**
-	 * Represents a long timestamp style.
+	 * Represents a medium time format. (T)
+	 * @example `16:20:30`
 	 */
-	LongTime = 'T',
+	MediumTime = 'T',
 	/**
-	 * Represents a short date style.
+	 * Represents a short date format. (d)
+	 * @example `20/04/2021`
 	 */
 	ShortDate = 'd',
 	/**
-	 * Represents a long date style.
+	 * Represents a long date format. (D)
+	 * @example `April 20, 2021`
 	 */
 	LongDate = 'D',
 	/**
-	 * Represents a short time style.
+	 * Represents a long date-short time format. (f)
+	 * @example `April 20, 2021 at 16:20`
 	 */
-	ShortDateTime = 'f',
+	LongDateShortTime = 'f',
 	/**
-	 * Represents a long time style.
+	 * Represents a full date-short time format. (F)
+	 * @example `Tuesday, April 20, 2021 at 16:20`
 	 */
-	LongDateTime = 'F',
+	FullDateShortTime = 'F',
 	/**
-	 * Represents a relative time style.
+	 * Represents a short date-short time format. (s)
+	 * @example `20/04/2021, 16:20`
+	 */
+	ShortDateShortTime = 's',
+	/**
+	 * Represents a short date-medium time format. (S)
+	 * @example `20/04/2021, 16:20:30`
+	 */
+	ShortDateMediumTime = 'S',
+	/**
+	 * Represents a relative time format. (R)
+	 * @example `2 months ago`
 	 */
 	RelativeTime = 'R',
 }
@@ -53,71 +92,76 @@ export enum TimestampStyle {
 /**
  * Represents a message link.
  */
-type MessageLink = `https://discord.com/channels/${string}/${string}/${string}`;
+export type MessageLink = `https://discord.com/channels/${string}/${string}/${string}`;
+
+/**
+ * Represents a channel link.
+ */
+export type ChannelLink = `https://discord.com/channels/${string}/${string}`;
 
 /**
  * Represents a timestamp.
  */
-type Timestamp = `<t:${number}:${TimestampStyle}>`;
+export type Timestamp = `<t:${number}:${TimestampStyle}>`;
 
 /**
  * Represents a formatter utility for formatting content.
  */
-export class Formatter {
+export const Formatter = {
 	/**
 	 * Formats a code block.
 	 * @param content The content of the code block.
 	 * @param language The language of the code block. Defaults to 'txt'.
 	 * @returns The formatted code block.
 	 */
-	static codeBlock(content: string, language = 'txt'): string {
+	codeBlock(content: string, language = 'txt'): string {
 		return `\`\`\`${language}\n${content}\n\`\`\``;
-	}
+	},
 
 	/**
 	 * Formats content into inline code.
 	 * @param content The content to format.
 	 * @returns The formatted content.
 	 */
-	static inlineCode(content: string): `\`${string}\`` {
+	inlineCode(content: string): `\`${string}\`` {
 		return `\`${content}\``;
-	}
+	},
 
 	/**
 	 * Formats content into bold text.
 	 * @param content The content to format.
 	 * @returns The formatted content.
 	 */
-	static bold(content: string): `**${string}**` {
+	bold(content: string): `**${string}**` {
 		return `**${content}**`;
-	}
+	},
 
 	/**
 	 * Formats content into italic text.
 	 * @param content The content to format.
 	 * @returns The formatted content.
 	 */
-	static italic(content: string): `*${string}*` {
+	italic(content: string): `*${string}*` {
 		return `*${content}*`;
-	}
+	},
 
 	/**
 	 * Formats content into underlined text.
 	 * @param content The content to format.
 	 * @returns The formatted content.
 	 */
-	static underline(content: string): `__${string}__` {
+	underline(content: string): `__${string}__` {
 		return `__${content}__`;
-	}
+	},
 
 	/**
 	 * Formats content into strikethrough text.
 	 * @param content The content to format.
 	 * @returns The formatted content.
 	 */
-	static strikeThrough(content: string): `~~${string}~~` {
+	strikeThrough(content: string): `~~${string}~~` {
 		return `~~${content}~~`;
-	}
+	},
 
 	/**
 	 * Formats content into a hyperlink.
@@ -125,36 +169,36 @@ export class Formatter {
 	 * @param url The URL to hyperlink to.
 	 * @returns The formatted content.
 	 */
-	static hyperlink(content: string, url: string): `[${string}](${string})` {
+	hyperlink(content: string, url: string): `[${string}](${string})` {
 		return `[${content}](${url})`;
-	}
+	},
 
 	/**
 	 * Formats content into a spoiler.
 	 * @param content The content to format.
 	 * @returns The formatted content.
 	 */
-	static spoiler(content: string): `||${string}||` {
+	spoiler(content: string): `||${string}||` {
 		return `||${content}||`;
-	}
+	},
 
 	/**
 	 * Formats content into a quote.
 	 * @param content The content to format.
 	 * @returns The formatted content.
 	 */
-	static blockQuote(content: string): string {
+	blockQuote(content: string): `>>> ${string}` {
 		return `>>> ${content}`;
-	}
+	},
 
 	/**
 	 * Formats content into a quote.
 	 * @param content The content to format.
 	 * @returns The formatted content.
 	 */
-	static quote(content: string): string {
+	quote(content: string): `> ${string}` {
 		return `> ${content}`;
-	}
+	},
 
 	/**
 	 * Formats a message link.
@@ -163,9 +207,9 @@ export class Formatter {
 	 * @param messageId The ID of the message.
 	 * @returns The formatted message link.
 	 */
-	static messageLink(guildId: string, channelId: string, messageId: string): MessageLink {
+	messageLink(guildId: string, channelId: string, messageId: string): MessageLink {
 		return `https://discord.com/channels/${guildId}/${channelId}/${messageId}`;
-	}
+	},
 
 	/**
 	 * Formats a header.
@@ -173,9 +217,9 @@ export class Formatter {
 	 * @param level The level of the header. Defaults to 1.
 	 * @returns The formatted header.
 	 */
-	static header(content: string, level: HeadingLevel = HeadingLevel.H1): string {
+	header(content: string, level: HeadingLevel = HeadingLevel.H1): string {
 		return `${'#'.repeat(level)} ${content}`;
-	}
+	},
 
 	/**
 	 * Formats a list.
@@ -183,21 +227,97 @@ export class Formatter {
 	 * @param ordered Whether the list is ordered. Defaults to false.
 	 * @returns The formatted list.
 	 */
-	static list(items: string[], ordered = false): string {
+	list(items: string[], ordered = false): string {
 		return items
 			.map((item, index) => {
 				return (ordered ? `${index + 1}. ` : '- ') + item;
 			})
 			.join('\n');
-	}
+	},
 
 	/**
 	 * Formats the given timestamp into discord unix timestamp format.
-	 * @param timestamp The timestamp to format.
-	 * @param style The style of the timestamp. Defaults to 't'.
+	 * @param timestamp The Date or unix millisecond timestamp to format.
+	 * @param style The style of the timestamp. Defaults to 'R'.
 	 * @returns The formatted timestamp.
 	 */
-	static timestamp(timestamp: Date, style: TimestampStyle = TimestampStyle.RelativeTime): Timestamp {
-		return `<t:${Math.floor(timestamp.getTime() / 1000)}:${style}>`;
-	}
-}
+	timestamp(timestamp: Date | number, style: TimestampStyle = TimestampStyle.RelativeTime): Timestamp {
+		const timestampSeconds =
+			typeof timestamp === 'number' ? Math.floor(timestamp / 1000) : Math.floor(timestamp.getTime() / 1000);
+
+		return `<t:${timestampSeconds}:${style}>`;
+	},
+
+	/**
+	 * Formats a user mention.
+	 * @param userId The ID of the user to mention.
+	 * @returns The formatted user mention.
+	 */
+	userMention(userId: string): `<@${string}>` {
+		return `<@${userId}>`;
+	},
+
+	/**
+	 * Formats a role mention.
+	 * @param roleId The ID of the role to mention.
+	 * @returns The formatted role mention.
+	 */
+	roleMention(roleId: string): `<@&${string}>` {
+		return `<@&${roleId}>`;
+	},
+
+	/**
+	 * Formats a channel mention.
+	 * @param channelId The ID of the channel to mention.
+	 * @returns The formatted channel mention.
+	 */
+	channelMention(channelId: string): `<#${string}>` {
+		return `<#${channelId}>`;
+	},
+
+	/**
+	 * Formats an emoji.
+	 * @param emojiId The ID of the emoji.
+	 * @param animated Whether the emoji is animated. Defaults to false.
+	 * @returns The formatted emoji.
+	 */
+	emojiMention(emojiId: string, name: string | null, animated = false): `<${'a' | ''}:${string}:${string}>` {
+		return `<${animated ? 'a' : ''}:${name ?? '_'}:${emojiId}>`;
+	},
+
+	/**
+	 * Formats a channel link.
+	 * @param channelId The ID of the channel.
+	 * @param guildId The ID of the guild. Defaults to '@me'.
+	 * @returns The formatted channel link.
+	 */
+	channelLink(channelId: string, guildId?: string): ChannelLink {
+		return `https://discord.com/channels/${guildId ?? '@me'}/${channelId}`;
+	},
+
+	/**
+	 * Forms a oauth2 invite link for the bot.
+	 * @param applicationId The ID of the application.
+	 * @param options Options for forming the invite link.
+	 * @param options.scopes Oauth2 scopes to be used.
+	 * @param options.disableGuildSelect Whether or not guild select must be disabled in oauth2 interface.
+	 * @param options.permissions Permissions to be granted to the application.
+	 */
+	generateOAuth2URL(
+		applicationId: string,
+		{ scopes, permissions, disableGuildSelect = false }: OAuth2URLOptions,
+	): string {
+		const queryOptions = new URLSearchParams({
+			client_id: applicationId,
+			scope: scopes.join(' '),
+			disable_guild_select: String(disableGuildSelect),
+		});
+
+		if (permissions) {
+			permissions = PermissionsBitField.resolve(permissions);
+			queryOptions.set('permissions', permissions.toString());
+		}
+
+		return `https://discord.com/oauth2/authorize?${queryOptions.toString()}`;
+	},
+};

@@ -1,7 +1,12 @@
-import { type APIPollMedia, PollLayoutType, type RESTAPIPollCreate } from 'discord-api-types/v10';
-import type { DeepPartial, EmojiResolvable, RestOrArray } from '../common';
-import { throwError } from '..';
-import { resolvePartialEmoji } from '../structures/extra/functions';
+import {
+	createValidationMetadata,
+	type DeepPartial,
+	type EmojiResolvable,
+	type RestOrArray,
+	resolvePartialEmoji,
+	SeyfertError,
+} from '../common';
+import { type APIPollMedia, PollLayoutType, type RESTAPIPollCreate } from '../types';
 
 export class PollBuilder {
 	constructor(public data: DeepPartial<RESTAPIPollCreate> = {}) {
@@ -39,13 +44,37 @@ export class PollBuilder {
 	}
 
 	toJSON(): RESTAPIPollCreate {
+		if (!this.data.question?.text && !this.data.question?.emoji)
+			throw new SeyfertError('MISSING_POLL_QUESTION', {
+				metadata: {
+					...createValidationMetadata('question to be set before calling toJSON()', this.data.question, {
+						component: 'PollBuilder',
+					}),
+					detail: 'Cannot convert to JSON without a question.',
+				},
+			});
+		if (!this.data.answers?.length)
+			throw new SeyfertError('MISSING_POLL_ANSWERS', {
+				metadata: {
+					...createValidationMetadata('at least one answer to be set before calling toJSON()', this.data.answers, {
+						component: 'PollBuilder',
+					}),
+					detail: 'Cannot convert to JSON without answers.',
+				},
+			});
 		return { ...this.data } as RESTAPIPollCreate;
 	}
 
 	private resolvedPollMedia(data: PollMedia) {
 		if (!data.emoji) return { text: data.text };
 		const resolve = resolvePartialEmoji(data.emoji);
-		if (!resolve) return throwError('Invalid Emoji');
+		if (!resolve)
+			throw new SeyfertError('INVALID_EMOJI', {
+				metadata: {
+					...createValidationMetadata('EmojiResolvable', data.emoji, { component: 'PollBuilder' }),
+					detail: 'Invalid Emoji',
+				},
+			});
 		return { text: data.text, emoji: resolve };
 	}
 }

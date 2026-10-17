@@ -1,0 +1,147 @@
+import type { Permissions, Snowflake } from '..';
+import type {
+	APIApplicationRoleConnection,
+	APIChannel,
+	APIConnection,
+	APIGuildMember,
+	APIUser,
+	GuildFeature,
+} from '../payloads';
+
+/**
+ * https://docs.discord.com/developers/resources/user#get-current-user
+ */
+export type RESTGetAPICurrentUserResult = APIUser;
+
+/**
+ * https://docs.discord.com/developers/resources/user#get-user
+ */
+export type RESTGetAPIUserResult = APIUser;
+
+/**
+ * https://docs.discord.com/developers/resources/user#get-current-user-guild-member
+ */
+export type RESTGetCurrentUserGuildMemberResult = APIGuildMember;
+
+/**
+ * https://docs.discord.com/developers/resources/user#modify-current-user
+ */
+export interface RESTPatchAPICurrentUserJSONBody {
+	/**
+	 * User's username, if changed may cause the user's discriminator to be randomized
+	 */
+	username?: string | undefined;
+	/**
+	 * If passed, modifies the user's avatar
+	 */
+	avatar?: string | null | undefined;
+	/**
+	 * If passed, modifies the user's banner
+	 */
+	banner?: string | null | undefined;
+}
+
+/**
+ * https://docs.discord.com/developers/resources/user#modify-current-user
+ */
+export type RESTPatchAPICurrentUserResult = APIUser;
+
+/**
+ * https://docs.discord.com/developers/resources/user#get-current-user-guilds
+ */
+export interface RESTGetAPICurrentUserGuildsQuery {
+	/**
+	 * Get guilds before this guild ID
+	 */
+	before?: Snowflake;
+	/**
+	 * Get guilds after this guild ID
+	 */
+	after?: Snowflake;
+	/**
+	 * Max number of guilds to return (1-200)
+	 *
+	 * @default 200
+	 */
+	limit?: number;
+	/**
+	 * Include approximate member and presence counts in response
+	 *
+	 * @default false
+	 */
+	with_counts?: boolean;
+}
+
+export interface RESTAPIPartialCurrentUserGuild {
+	id: Snowflake;
+	name: string;
+	icon: string | null;
+	owner: boolean;
+	features: GuildFeature[];
+	permissions: Permissions;
+	approximate_member_count?: number;
+	approximate_presence_count?: number;
+}
+
+/**
+ * https://docs.discord.com/developers/resources/user#get-current-user-guilds
+ */
+export type RESTGetAPICurrentUserGuildsResult = RESTAPIPartialCurrentUserGuild[];
+
+/**
+ * https://docs.discord.com/developers/resources/user#leave-guild
+ */
+export type RESTDeleteAPICurrentUserGuildResult = undefined;
+
+/**
+ * https://docs.discord.com/developers/resources/user#create-dm
+ */
+export interface RESTPostAPICurrentUserCreateDMChannelJSONBody {
+	/**
+	 * The recipient to open a DM channel with
+	 */
+	recipient_id: string;
+}
+
+/**
+ * https://docs.discord.com/developers/resources/user#create-dm
+ */
+export type RESTPostAPICurrentUserCreateDMChannelResult = APIChannel;
+
+/**
+ * https://docs.discord.com/developers/resources/user#get-user-connections
+ */
+export type RESTGetAPICurrentUserConnectionsResult = APIConnection[];
+
+/**
+ * https://docs.discord.com/developers/resources/user#get-user-application-role-connection
+ */
+export type RESTGetAPICurrentUserApplicationRoleConnectionResult = APIApplicationRoleConnection;
+
+/**
+ * https://docs.discord.com/developers/resources/user#update-user-application-role-connection
+ */
+export interface RESTPutAPICurrentUserApplicationRoleConnectionJSONBody {
+	/**
+	 * The vanity name of the platform a bot has connected (max 50 characters)
+	 */
+	platform_name?: string | undefined;
+	/**
+	 * The username on the platform a bot has connected (max 100 characters)
+	 */
+	platform_username?: string | undefined;
+	/**
+	 * Object mapping application role connection metadata keys to their `string`-ified value (max 100 characters) for the user on the platform a bot has connected
+	 */
+	metadata?: Record<string, number | string> | undefined;
+}
+
+/**
+ * https://docs.discord.com/developers/resources/user#update-user-application-role-connection
+ */
+export type RESTPutAPICurrentUserApplicationRoleConnectionResult = APIApplicationRoleConnection;
+
+/**
+ * https://docs.discord.com/developers/resources/user#delete-current-user-application-role-connection
+ */
+export type RESTDeleteAPICurrentUserApplicationRoleConnectionResult = undefined;

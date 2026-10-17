@@ -1,3 +1,5 @@
+import { createValidationMetadata, type EmojiResolvable, type RestOrArray, SeyfertError } from '../common';
+import { resolvePartialEmoji } from '../common/it/utils';
 import {
 	type APIChannelSelectComponent,
 	type APIMentionableSelectComponent,
@@ -11,18 +13,7 @@ import {
 	type ChannelType,
 	ComponentType,
 	SelectMenuDefaultValueType,
-} from 'discord-api-types/v10';
-import { throwError } from '..';
-import type { EmojiResolvable, RestOrArray, ToClass } from '../common';
-import type {
-	ChannelSelectMenuInteraction,
-	ComponentInteraction,
-	MentionableSelectMenuInteraction,
-	RoleSelectMenuInteraction,
-	StringSelectMenuInteraction,
-	UserSelectMenuInteraction,
-} from '../structures';
-import { resolvePartialEmoji } from '../structures/extra/functions';
+} from '../types';
 import { BaseComponentBuilder, type OptionValuesLength } from './Base';
 
 export type BuilderSelectMenus =
@@ -31,6 +22,8 @@ export type BuilderSelectMenus =
 	| MentionableSelectMenu
 	| ChannelSelectMenu
 	| StringSelectMenu;
+
+type StringSelectOptionResolvable<Value extends string = string> = StringSelectOption | APISelectMenuOption<Value>;
 
 /**
  * Maps default values for Select Menus.
@@ -46,22 +39,21 @@ function mappedDefault<T extends SelectMenuDefaultValueType>(
 	return ids.flat().map(id => ({ id, type }));
 }
 
+function resolveStringSelectOption(option: StringSelectOptionResolvable): StringSelectOption {
+	return option instanceof StringSelectOption ? option : new StringSelectOption(option);
+}
+
 /**
  * Represents a base class for building Select Menus.
  * @template Select - The type of APISelectMenuComponent.
  * @template Interaction - The type of interaction.
  * @example
- * const selectMenu = new SelectMenu<APIUserSelectComponent, UserSelectMenuInteraction>();
+ * const selectMenu = new SelectMenu<APIUserSelectComponent>();
  * selectMenu.setCustomId("user-select-menu");
  * selectMenu.setPlaceholder("Select a user");
- * selectMenu.run((interaction) => {
- *   // Handle select menu interaction
- * });
  */
 export class SelectMenu<
 	Select extends APISelectMenuComponent = APISelectMenuComponent,
-	//@ts-expect-error
-	Interaction = ComponentInteraction,
 > extends BaseComponentBuilder<Select> {
 	/**
 	 * Sets the custom ID for the select menu.
@@ -103,6 +95,17 @@ export class SelectMenu<
 		this.data.disabled = disabled;
 		return this;
 	}
+
+	/**
+	 *
+	 * Sets whether the select menu is required to answer in a modal.
+	 *  [required=true] - Indicates whether the select menu is required to answer in a modal.
+	 * @returns The current SelectMenu instance.
+	 */
+	setRequired(required = true): this {
+		this.data.required = required;
+		return this;
+	}
 }
 
 /**
@@ -112,7 +115,7 @@ export class SelectMenu<
  * userSelectMenu.setCustomId("user-select");
  * userSelectMenu.addDefaultUsers("123456789", "987654321");
  */
-export class UserSelectMenu extends SelectMenu<APIUserSelectComponent, UserSelectMenuInteraction> {
+export class UserSelectMenu extends SelectMenu<APIUserSelectComponent> {
 	constructor(data: Partial<APIUserSelectComponent> = {}) {
 		super({ ...data, type: ComponentType.UserSelect });
 	}
@@ -147,7 +150,7 @@ export class UserSelectMenu extends SelectMenu<APIUserSelectComponent, UserSelec
  * roleSelectMenu.setCustomId("role-select");
  * roleSelectMenu.addDefaultRoles("123456789", "987654321");
  */
-export class RoleSelectMenu extends SelectMenu<APIRoleSelectComponent, RoleSelectMenuInteraction> {
+export class RoleSelectMenu extends SelectMenu<APIRoleSelectComponent> {
 	constructor(data: Partial<APIRoleSelectComponent> = {}) {
 		super({ ...data, type: ComponentType.RoleSelect });
 	}
@@ -175,7 +178,7 @@ export class RoleSelectMenu extends SelectMenu<APIRoleSelectComponent, RoleSelec
 	}
 }
 
-export type MentionableDefaultElement = { id: string; type: keyof Omit<typeof SelectMenuDefaultValueType, 'Channel'> };
+export type MentionableDefaultElement = { id: string; type: keyof typeof SelectMenuDefaultValueType };
 
 /**
  * Represents a Select Menu for selecting mentionable entities.
@@ -183,7 +186,7 @@ export type MentionableDefaultElement = { id: string; type: keyof Omit<typeof Se
  * const mentionableSelectMenu = new MentionableSelectMenu();
  * mentionableSelectMenu.setCustomId("mentionable-select");
  */
-export class MentionableSelectMenu extends SelectMenu<APIMentionableSelectComponent, MentionableSelectMenuInteraction> {
+export class MentionableSelectMenu extends SelectMenu<APIMentionableSelectComponent> {
 	constructor(data: Partial<APIMentionableSelectComponent> = {}) {
 		super({ ...data, type: ComponentType.MentionableSelect });
 	}
@@ -225,7 +228,7 @@ export class MentionableSelectMenu extends SelectMenu<APIMentionableSelectCompon
  * channelSelectMenu.addDefaultChannels("123456789", "987654321");
  * channelSelectMenu.setChannelTypes([ChannelType.GuildText, ChannelType.GuildVoice]);
  */
-export class ChannelSelectMenu extends SelectMenu<APIChannelSelectComponent, ChannelSelectMenuInteraction> {
+export class ChannelSelectMenu extends SelectMenu<APIChannelSelectComponent> {
 	constructor(data: Partial<APIChannelSelectComponent> = {}) {
 		super({ ...data, type: ComponentType.ChannelSelect });
 	}
@@ -274,14 +277,12 @@ export class ChannelSelectMenu extends SelectMenu<APIChannelSelectComponent, Cha
  *   { label: "Option 3", value: "option_3" },
  * ]);
  */
-export class StringSelectMenu extends (SelectMenu as unknown as ToClass<
-	Omit<SelectMenu<APIStringSelectComponent, StringSelectMenuInteraction>, 'data' | 'toJSON'>,
-	StringSelectMenu
->) {
-	declare data: Omit<APIStringSelectComponent, 'options'> & { options: StringSelectOption[] };
-	constructor(data: Partial<APIStringSelectComponent> = {}) {
+export class StringSelectMenu<Value extends string = string> extends SelectMenu<APIStringSelectComponent<Value>> {
+	//@ts-expect-error
+	declare data: Omit<Partial<APIStringSelectComponent<Value>>, 'options'> & { options: StringSelectOption[] };
+	constructor(data: Partial<APIStringSelectComponent<Value>> = {}) {
 		super({ ...data, type: ComponentType.StringSelect });
-		this.data.options = (data.options ?? []).map(x => new StringSelectOption(x));
+		this.data.options = data.options?.map(x => new StringSelectOption(x)) ?? [];
 	}
 
 	/**
@@ -289,8 +290,8 @@ export class StringSelectMenu extends (SelectMenu as unknown as ToClass<
 	 * @param options - Options to be added.
 	 * @returns The current StringSelectMenu instance.
 	 */
-	addOption(...options: RestOrArray<StringSelectOption>): this {
-		this.data.options = this.data.options.concat(options.flat());
+	addOption(...options: RestOrArray<StringSelectOptionResolvable<Value>>): this {
+		this.data.options = this.data.options.concat(options.flat().map(resolveStringSelectOption));
 		return this;
 	}
 
@@ -299,17 +300,27 @@ export class StringSelectMenu extends (SelectMenu as unknown as ToClass<
 	 *  options - Options to be set.
 	 * @returns The current StringSelectMenu instance.
 	 */
-	setOptions(options: StringSelectOption[]): this {
-		this.data.options = options;
+	setOptions(...options: RestOrArray<StringSelectOptionResolvable<Value>>): this {
+		this.data.options = options.flat().map(resolveStringSelectOption);
 		return this;
 	}
 
-	toJSON(): APIStringSelectComponent {
+	/**
+	 * Sets whether the string select is required to answer in a modal.
+	 * @param required - Whether the string select is required to answer in a modal.
+	 * @returns The current StringSelectMenu instance.
+	 */
+	setRequired(required = true): this {
+		this.data.required = required;
+		return this;
+	}
+
+	toJSON(): APIStringSelectComponent<Value> {
 		const { options, ...raw } = this.data;
 		return {
 			...raw,
-			options: this.data.options.map(x => x.toJSON()),
-		};
+			options: options.map(x => x.toJSON()),
+		} as APIStringSelectComponent<Value>;
 	}
 }
 
@@ -353,11 +364,11 @@ export class StringSelectOption {
 
 	/**
 	 * Sets whether the option is the default.
-	 *  [Default=true] - Indicates whether the option is the default.
+	 *  [value=true] - Indicates whether the option is the default.
 	 * @returns The current StringSelectOption instance.
 	 */
-	setDefault(Default = true): this {
-		this.data.default = Default;
+	setDefault(value = true): this {
+		this.data.default = value;
 		return this;
 	}
 
@@ -368,7 +379,13 @@ export class StringSelectOption {
 	 */
 	setEmoji(emoji: EmojiResolvable) {
 		const resolve = resolvePartialEmoji(emoji);
-		if (!resolve) return throwError('Invalid Emoji');
+		if (!resolve)
+			throw new SeyfertError('INVALID_EMOJI', {
+				metadata: {
+					...createValidationMetadata('EmojiResolvable', emoji, { component: 'StringSelectOption' }),
+					detail: 'Invalid Emoji',
+				},
+			});
 		this.data.emoji = resolve as APIMessageComponentEmoji;
 		return this;
 	}
@@ -378,6 +395,24 @@ export class StringSelectOption {
 	 * @returns The option data in JSON format.
 	 */
 	toJSON(): APISelectMenuOption {
+		if (!this.data.label)
+			throw new SeyfertError('MISSING_STRING_SELECT_OPTION_LABEL', {
+				metadata: {
+					...createValidationMetadata('label to be set before calling toJSON()', this.data.label, {
+						component: 'StringSelectOption',
+					}),
+					detail: 'Cannot convert to JSON without a label.',
+				},
+			});
+		if (!this.data.value)
+			throw new SeyfertError('MISSING_STRING_SELECT_OPTION_VALUE', {
+				metadata: {
+					...createValidationMetadata('value to be set before calling toJSON()', this.data.value, {
+						component: 'StringSelectOption',
+					}),
+					detail: 'Cannot convert to JSON without a value.',
+				},
+			});
 		return { ...this.data } as APISelectMenuOption;
 	}
 }

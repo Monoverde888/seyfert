@@ -1,6 +1,13 @@
 import { CDN_URL } from '../common';
 import type { APIRoutes, ApiHandler, CDNRoute } from './index';
-import type { HttpMethods, ImageExtension, ImageSize, StickerExtension } from './shared';
+import type {
+	HttpMethods,
+	ImageExtension,
+	ImageSize,
+	SoundExtension,
+	StickerExtension,
+	TagBadgeExtension,
+} from './shared';
 
 export enum ProxyRequestMethod {
 	Delete = 'delete',
@@ -43,14 +50,12 @@ export const CDNRouter = {
 		return new Proxy(noop, {
 			get: (_, key: string) => {
 				if (key === 'get') {
-					return (value: string | CDNUrlOptions | undefined, options?: CDNUrlOptions) => {
+					return (value: string | number | CDNUrlOptions | undefined, options?: CDNUrlOptions) => {
 						const lastRoute = `${CDN_URL}/${route.join('/')}`;
-						let routeResult = lastRoute;
 						if (typeof value === 'string' || typeof value === 'number') {
-							routeResult = `${lastRoute}${value ? `/${value}` : ''}`;
-							return parseCDNURL(routeResult, options);
+							return parseCDNURL(`${lastRoute}/${value}`, options);
 						}
-						return parseCDNURL(routeResult, value);
+						return parseCDNURL(lastRoute, value);
 					};
 				}
 				return this.createProxy([...route, key]);
@@ -62,8 +67,10 @@ export const CDNRouter = {
 	},
 };
 
-export interface BaseCDNUrlOptions {
-	extension?: ImageExtension | StickerExtension | undefined;
+export type AllCDNExtensions = ImageExtension | StickerExtension | SoundExtension | TagBadgeExtension;
+
+export interface BaseCDNUrlOptions<T extends AllCDNExtensions = AllCDNExtensions> {
+	extension?: T;
 	size?: ImageSize;
 }
 
@@ -75,7 +82,9 @@ export function parseCDNURL(route: string, options: CDNUrlOptions = {}) {
 	if (options.forceStatic && route.includes('a_')) options.extension = 'png';
 	if (!options.extension && route.includes('a_')) options.extension = 'gif';
 
-	const url = new URL(`${route}.${options.extension || 'png'}`);
+	options.extension ||= route.includes('soundboard') ? 'ogg' : 'png';
+
+	const url = new URL(`${route}.${options.extension}`);
 
 	if (options.size) url.searchParams.set('size', `${options.size}`);
 

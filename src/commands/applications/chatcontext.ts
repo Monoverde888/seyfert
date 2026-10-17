@@ -1,115 +1,181 @@
-import { MessageFlags } from 'discord-api-types/v10';
-import type { AllChannels, Guild, InferWithPrefix, ReturnCache, WebhookMessage } from '../..';
+import type { ReturnCache } from '../../cache';
 import type { Client, WorkerClient } from '../../client';
-import type { If, UnionToTuple, When } from '../../common';
-import type { InteractionCreateBodyRequest, InteractionMessageUpdateBodyRequest } from '../../common/types/write';
+import type {
+	BaseGuildChannelStructure,
+	GuildMemberStructure,
+	GuildStructure,
+	InteractionGuildMemberStructure,
+	MessageStructure,
+	OptionResolverStructure,
+	UserStructure,
+	WebhookMessageStructure,
+} from '../../client/transformers';
+import { type If, type MakeRequired, SeyfertError, type When } from '../../common';
+import type {
+	InteractionCreateBodyRequest,
+	InteractionMessageUpdateBodyRequest,
+	MessageWebhookCreateBodyRequest,
+	ModalCreateBodyRequest,
+	ModalCreateOptions,
+} from '../../common/types/write';
 import {
-	Message,
-	type ChatInputCommandInteraction,
-	type GuildMember,
-	type InteractionGuildMember,
+	type AllChannels,
+	type AllGuildChannels,
+	ChatInputCommandInteraction,
+	type Message,
+	type ModalSubmitInteraction,
 } from '../../structures';
+import { MessageFlags, type RESTGetAPIGuildQuery } from '../../types';
 import { BaseContext } from '../basecontext';
-import type { RegisteredMiddlewares } from '../decorators';
-import type { OptionResolver } from '../optionresolver';
+import type { ResolvedRegisteredMiddlewares } from '../decorators';
 import type { Command, ContextOptions, OptionsRecord, SubCommand } from './chat';
-import type { CommandMetadata, ExtendContext, GlobalMetadata, UsingClient } from './shared';
+import type { CommandMetadata, ExtendContext, GlobalMetadata, InferWithPrefix, UsingClient } from './shared';
 
-export interface CommandContext<T extends OptionsRecord = {}, M extends keyof RegisteredMiddlewares = never>
-	extends BaseContext,
-		ExtendContext {}
+type GuildCommandChannel = AllGuildChannels | BaseGuildChannelStructure;
+
+// Explicit variance avoids resolving the registry to infer variance while comparing context types.
+export interface CommandContext<
+	T extends OptionsRecord = {},
+	in M extends keyof ResolvedRegisteredMiddlewares<M> = never,
+> extends BaseContext,
+		ExtendContext {
+	/**@internal */
+	__edited?: true;
+	/**@internal */
+	__deferred?: true;
+}
 
 export class CommandContext<
 	T extends OptionsRecord = {},
-	M extends keyof RegisteredMiddlewares = never,
+	in M extends keyof ResolvedRegisteredMiddlewares<M> = never,
 > extends BaseContext {
-	message!: If<InferWithPrefix, Message | undefined, undefined>;
+	message!: If<InferWithPrefix, MessageStructure | undefined, undefined>;
 	interaction!: If<InferWithPrefix, ChatInputCommandInteraction | undefined, ChatInputCommandInteraction>;
 
-	messageResponse?: If<InferWithPrefix, Message | undefined>;
+	messageResponse?: If<InferWithPrefix, MessageStructure | undefined, undefined>;
 	constructor(
 		readonly client: UsingClient,
-		data: ChatInputCommandInteraction | Message,
-		readonly resolver: OptionResolver,
+		data: ChatInputCommandInteraction | MessageStructure,
+		readonly resolver: OptionResolverStructure,
 		readonly shardId: number,
 		readonly command: Command | SubCommand,
 	) {
 		super(client);
-		if (data instanceof Message) {
-			this.message = data as never;
-		} else {
+		if (data instanceof ChatInputCommandInteraction) {
 			this.interaction = data;
+		} else {
+			this.message = data as never;
 		}
 	}
 
 	options: ContextOptions<T> = {} as never;
-	metadata: CommandMetadata<UnionToTuple<M>> = {} as never;
+	metadata: CommandMetadata<M> = {} as never;
 	globalMetadata: GlobalMetadata = {};
 
-	get proxy() {
-		return this.client.proxy;
-	}
-
 	get t() {
-		return this.client.t(this.interaction?.locale ?? this.client.langs?.defaultLang ?? 'en-US');
+		return this.client.t(
+			this.client.langs.preferGuildLocale
+				? (this.interaction?.guildLocale ?? this.interaction?.locale ?? this.client.langs.defaultLang ?? 'en-US')
+				: (this.interaction?.locale ?? this.client.langs.defaultLang ?? 'en-US'),
+		);
 	}
 
 	get fullCommandName() {
 		return this.resolver.fullCommandName;
 	}
 
-	async write<FR extends boolean = false>(
+	get deferred() {
+		return !!this.__deferred;
+	}
+
+	async write<WR extends boolean = false>(
 		body: InteractionCreateBodyRequest,
-		fetchReply?: FR,
-	): Promise<When<FR, WebhookMessage | Message, void | WebhookMessage | Message>> {
-		if (this.interaction) return this.interaction.write(body, fetchReply);
+		withResponse?: WR,
+	): Promise<When<WR, WebhookMessageStructure | When<InferWithPrefix, MessageStructure, never>, void>> {
+		if (this.interaction) return this.interaction.write(body, withResponse);
 		const options = (this.client as Client | WorkerClient).options?.commands;
-		return (this.messageResponse = await (this.message! as Message)[
-			!this.messageResponse && options?.reply?.(this) ? 'reply' : 'write'
-		](body));
+		return ((this.messageResponse as MessageStructure | undefined) = await (this.message! as Message)[
+			!(this.messageResponse as MessageStructure | undefined) && (await options?.reply?.(this)) ? 'reply' : 'write'
+		](body)) as never;
 	}
 
-	async deferReply(ephemeral = false) {
-		if (this.interaction) return this.interaction.deferReply(ephemeral ? MessageFlags.Ephemeral : undefined);
-		const options = (this.client as Client | WorkerClient).options?.commands;
-		return (this.messageResponse = await (this.message! as Message)[options?.reply?.(this) ? 'reply' : 'write'](
-			options?.deferReplyResponse?.(this) ?? { content: 'Thinking...' },
-		));
+	modal(body: ModalCreateBodyRequest, options?: undefined): Promise<undefined>;
+	modal(body: ModalCreateBodyRequest, options: ModalCreateOptions): Promise<ModalSubmitInteraction | null>;
+	modal(body: ModalCreateBodyRequest, options?: ModalCreateOptions | undefined) {
+		if (!this.interaction) throw new SeyfertError('CANNOT_USE_MODAL');
+		if (options === undefined) return this.interaction.modal(body);
+		return this.interaction.modal(body, options);
 	}
 
-	async editResponse(body: InteractionMessageUpdateBodyRequest) {
+	async deferReply<WR extends boolean = false>(
+		ephemeral = false,
+		withResponse?: WR,
+	): Promise<
+		When<
+			WR,
+			WebhookMessageStructure | When<InferWithPrefix, MessageStructure, never>,
+			When<InferWithPrefix, MessageStructure, never> | undefined
+		>
+	> {
+		if (this.interaction)
+			return this.interaction.deferReply(ephemeral ? MessageFlags.Ephemeral : undefined, withResponse);
+		this.__deferred = true;
+		const options = (this.client as Client | WorkerClient).options?.commands;
+		return ((this.messageResponse as MessageStructure | undefined) = await (this.message! as Message)[
+			(await options?.reply?.(this)) ? 'reply' : 'write'
+		]((await options?.deferReplyResponse?.(this)) ?? { content: 'Thinking...' })) as never;
+	}
+
+	async editResponse(
+		body: InteractionMessageUpdateBodyRequest,
+	): Promise<When<InferWithPrefix, WebhookMessageStructure | MessageStructure, WebhookMessageStructure>> {
 		if (this.interaction) return this.interaction.editResponse(body);
-		return (this.messageResponse = await this.messageResponse!.edit(body));
+		if (this.__deferred && !this.__edited) {
+			this.__edited = true;
+			if ((this.messageResponse as MessageStructure | undefined)?.content) body.content ??= '';
+			if ((this.messageResponse as MessageStructure | undefined)?.embeds.length) body.embeds ??= [];
+		}
+		return ((this.messageResponse as MessageStructure | undefined) = await (
+			this.messageResponse as unknown as MessageStructure
+		).edit(body)) as never;
 	}
 
 	deleteResponse() {
 		if (this.interaction) return this.interaction.deleteResponse();
-		return this.messageResponse!.delete();
+		return (this.messageResponse as unknown as MessageStructure).delete();
 	}
 
-	editOrReply<FR extends boolean = false>(
+	editOrReply<WR extends boolean = false>(
 		body: InteractionCreateBodyRequest | InteractionMessageUpdateBodyRequest,
-		fetchReply?: FR,
-	): Promise<When<FR, WebhookMessage | Message, void | WebhookMessage | Message>> {
-		if (this.interaction) return this.interaction.editOrReply(body as InteractionCreateBodyRequest, fetchReply);
-		if (this.messageResponse) {
-			return this.editResponse(body);
+		withResponse?: WR,
+	): Promise<When<WR, WebhookMessageStructure | When<InferWithPrefix, MessageStructure, never>, void>> {
+		if (this.interaction) return this.interaction.editOrReply(body as InteractionCreateBodyRequest, withResponse);
+		if (this.messageResponse as MessageStructure | undefined) {
+			return this.editResponse(body) as never;
 		}
-		return this.write(body as InteractionCreateBodyRequest, fetchReply);
+		return this.write(body as InteractionCreateBodyRequest, withResponse);
+	}
+
+	followup(
+		body: MessageWebhookCreateBodyRequest,
+	): Promise<If<InferWithPrefix, WebhookMessageStructure | MessageStructure, WebhookMessageStructure>> {
+		if (this.interaction) return this.interaction.followup(body);
+		return (this.messageResponse as unknown as MessageStructure).reply(body) as never;
 	}
 
 	async fetchResponse(): Promise<
-		If<InferWithPrefix, WebhookMessage | Message | undefined, WebhookMessage | undefined>
+		If<InferWithPrefix, WebhookMessageStructure | MessageStructure, WebhookMessageStructure>
 	> {
 		if (this.interaction) return this.interaction.fetchResponse();
-		this.messageResponse = await this.messageResponse?.fetch();
-		return this.messageResponse as undefined;
+		return ((this.messageResponse as MessageStructure | undefined) = await (
+			this.messageResponse as unknown as MessageStructure
+		).fetch()) as never;
 	}
 
-	channel(mode?: 'rest' | 'flow'): Promise<If<InferWithPrefix, AllChannels | undefined, AllChannels>>;
-	channel(mode?: 'cache'): ReturnCache<If<InferWithPrefix, AllChannels | undefined, AllChannels>>;
-	channel(mode: 'cache' | 'rest' | 'flow' = 'cache') {
-		if (this.interaction?.channel && mode === 'cache')
+	channel(mode?: 'rest' | 'flow'): Promise<AllChannels>;
+	channel(mode: 'cache'): ReturnCache<If<InferWithPrefix, AllChannels | undefined, AllChannels>>;
+	channel(mode: 'cache' | 'rest' | 'flow' = 'flow') {
+		if (this.interaction && mode === 'cache')
 			return this.client.cache.adapter.isAsync ? Promise.resolve(this.interaction.channel) : this.interaction.channel;
 		switch (mode) {
 			case 'cache':
@@ -122,9 +188,9 @@ export class CommandContext<
 		}
 	}
 
-	me(mode?: 'rest' | 'flow'): Promise<GuildMember>;
-	me(mode?: 'cache'): ReturnCache<GuildMember | undefined>;
-	me(mode: 'cache' | 'rest' | 'flow' = 'cache') {
+	me(mode?: 'rest' | 'flow'): Promise<GuildMemberStructure | undefined>;
+	me(mode: 'cache'): ReturnCache<GuildMemberStructure | undefined>;
+	me(mode: 'cache' | 'rest' | 'flow' = 'flow') {
 		if (!this.guildId)
 			return mode === 'cache' ? (this.client.cache.adapter.isAsync ? Promise.resolve() : undefined) : Promise.resolve();
 		switch (mode) {
@@ -138,15 +204,27 @@ export class CommandContext<
 		}
 	}
 
-	guild(mode?: 'rest' | 'flow'): Promise<Guild<'cached' | 'api'> | undefined>;
-	guild(mode?: 'cache'): ReturnCache<Guild<'cached'> | undefined>;
-	guild(mode: 'cache' | 'rest' | 'flow' = 'cache') {
+	fetchMember(mode?: 'rest' | 'flow'): Promise<GuildMemberStructure | undefined>;
+	fetchMember(mode: 'cache'): ReturnCache<GuildMemberStructure | undefined>;
+	fetchMember(mode: 'cache' | 'rest' | 'flow' = 'flow'): any {
 		if (!this.guildId)
-			return (mode === 'cache'
-				? this.client.cache.adapter.isAsync
-					? Promise.resolve()
-					: undefined
-				: Promise.resolve()) as unknown as undefined;
+			return mode === 'cache' ? (this.client.cache.adapter.isAsync ? Promise.resolve() : undefined) : Promise.resolve();
+		switch (mode) {
+			case 'cache':
+				return (
+					this.client.cache.members?.get(this.author.id, this.guildId) ||
+					(this.client.cache.adapter.isAsync ? (Promise.resolve() as any) : undefined)
+				);
+			default:
+				return this.client.members.fetch(this.guildId, this.author.id, mode === 'rest');
+		}
+	}
+
+	guild(mode?: 'rest' | 'flow', query?: RESTGetAPIGuildQuery): Promise<GuildStructure<'cached' | 'api'> | undefined>;
+	guild(mode: 'cache', query?: RESTGetAPIGuildQuery): ReturnCache<GuildStructure<'cached'> | undefined>;
+	guild(mode: 'cache' | 'rest' | 'flow' = 'flow', query?: RESTGetAPIGuildQuery) {
+		if (!this.guildId)
+			return mode === 'cache' ? (this.client.cache.adapter.isAsync ? Promise.resolve() : undefined) : Promise.resolve();
 		switch (mode) {
 			case 'cache':
 				return (
@@ -154,31 +232,52 @@ export class CommandContext<
 					(this.client.cache.adapter.isAsync ? (Promise.resolve() as any) : undefined)
 				);
 			default:
-				return this.client.guilds.fetch(this.guildId, mode === 'rest');
+				return this.client.guilds.fetch(this.guildId, { force: mode === 'rest', query });
 		}
 	}
 
 	get guildId() {
-		return this.interaction?.guildId || (this.message! as Message | undefined)?.guildId;
+		return this.interaction?.guildId || (this.message! as MessageStructure | undefined)?.guildId;
 	}
 
 	get channelId() {
-		return this.interaction?.channelId || (this.message! as Message).channelId;
+		return this.interaction?.channel.id || (this.message! as MessageStructure).channelId;
 	}
 
-	get author() {
-		return this.interaction?.user || (this.message! as Message).author;
+	get author(): UserStructure {
+		return this.interaction?.user || (this.message! as MessageStructure).author;
 	}
 
 	get member(): If<
 		InferWithPrefix,
-		GuildMember | InteractionGuildMember | undefined,
-		InteractionGuildMember | undefined
+		GuildMemberStructure | InteractionGuildMemberStructure | undefined,
+		InteractionGuildMemberStructure | undefined
 	> {
-		return this.interaction?.member || ((this.message! as Message)?.member as any);
+		return this.interaction?.member || ((this.message! as MessageStructure)?.member as any);
 	}
 
-	isChat(): this is CommandContext {
+	isChat(): this is CommandContext<T, M> {
 		return true;
 	}
+
+	inGuild(): this is GuildCommandContext<T, M> {
+		return !!this.guildId;
+	}
+}
+
+export interface GuildCommandContext<
+	T extends OptionsRecord = {},
+	in M extends keyof ResolvedRegisteredMiddlewares<M> = never,
+> extends Omit<MakeRequired<CommandContext<T, M>, 'guildId' | 'member'>, 'channel' | 'guild' | 'me' | 'fetchMember'> {
+	channel(mode?: 'rest' | 'flow'): Promise<GuildCommandChannel>;
+	channel(mode: 'cache'): ReturnCache<If<InferWithPrefix, GuildCommandChannel | undefined, GuildCommandChannel>>;
+
+	guild(mode?: 'rest' | 'flow'): Promise<GuildStructure<'cached' | 'api'>>;
+	guild(mode: 'cache'): ReturnCache<GuildStructure<'cached'> | undefined>;
+
+	me(mode?: 'rest' | 'flow'): Promise<GuildMemberStructure>;
+	me(mode: 'cache'): ReturnCache<GuildMemberStructure | undefined>;
+
+	fetchMember(mode?: 'rest' | 'flow'): Promise<GuildMemberStructure>;
+	fetchMember(mode: 'cache'): ReturnCache<GuildMemberStructure | undefined>;
 }

@@ -1,22 +1,16 @@
-import type { APIUser, GatewayActivity, GatewayPresenceUpdateDispatchData } from 'discord-api-types/v10';
-
-type FixedGatewayPresenceUpdateDispatchData =
-	| (Omit<GatewayPresenceUpdateDispatchData, 'user'> & { user_id: string; user: undefined })
-	| (Omit<GatewayPresenceUpdateDispatchData, 'user'> & {
-			user: Partial<APIUser> & Pick<APIUser, 'id'>;
-			user_id: undefined;
-	  });
+import type { GatewayActivity, GatewayPresenceUpdateDispatchData } from '../../../types';
 
 export class PresenceUpdateHandler {
-	presenceUpdate = new Map<string, { timeout: NodeJS.Timeout; presence: FixedGatewayPresenceUpdateDispatchData }>();
+	presenceUpdate = new Map<string, { timeout: NodeJS.Timeout; presence: GatewayPresenceUpdateDispatchData }>();
 
-	check(presence: FixedGatewayPresenceUpdateDispatchData) {
-		if (!this.presenceUpdate.has(presence.user?.id ?? presence.user_id!)) {
+	check(presence: GatewayPresenceUpdateDispatchData) {
+		const key = `${presence.guild_id}.${presence.user.id}`;
+		if (!this.presenceUpdate.has(key)) {
 			this.setPresence(presence);
 			return true;
 		}
 
-		const data = this.presenceUpdate.get(presence.user?.id ?? presence.user_id!)!;
+		const data = this.presenceUpdate.get(key)!;
 
 		if (this.presenceEquals(data.presence, presence)) {
 			return false;
@@ -29,21 +23,18 @@ export class PresenceUpdateHandler {
 		return true;
 	}
 
-	setPresence(presence: FixedGatewayPresenceUpdateDispatchData) {
-		this.presenceUpdate.set(presence.user?.id ?? presence.user_id!, {
+	setPresence(presence: GatewayPresenceUpdateDispatchData) {
+		const key = `${presence.guild_id}.${presence.user.id}`;
+		this.presenceUpdate.set(key, {
 			presence,
 			timeout: setTimeout(() => {
-				this.presenceUpdate.delete(presence.user?.id ?? presence.user_id!);
+				this.presenceUpdate.delete(key);
 			}, 1.5e3),
 		});
 	}
 
-	presenceEquals(
-		oldPresence: FixedGatewayPresenceUpdateDispatchData,
-		newPresence: FixedGatewayPresenceUpdateDispatchData,
-	) {
+	presenceEquals(oldPresence: GatewayPresenceUpdateDispatchData, newPresence: GatewayPresenceUpdateDispatchData) {
 		return (
-			newPresence &&
 			oldPresence.status === newPresence.status &&
 			oldPresence.activities?.length === newPresence.activities?.length &&
 			oldPresence.activities?.every((activity, index) =>

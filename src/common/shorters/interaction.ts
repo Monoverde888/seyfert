@@ -1,9 +1,11 @@
-import { BaseInteraction, WebhookMessage, resolveFiles, type ReplyInteractionBody, Modal } from '../..';
+import { BaseInteraction, Modal, type ReplyInteractionBody, resolveFiles } from '../..';
+import { Transformers, type WebhookMessageStructure } from '../../client/transformers';
+import type { RESTPostAPIWebhookWithTokenWaitResult } from '../../types';
 import type { InteractionMessageUpdateBodyRequest, MessageWebhookCreateBodyRequest } from '../types/write';
 import { BaseShorter } from './base';
 
 export class InteractionShorter extends BaseShorter {
-	async reply(id: string, token: string, body: ReplyInteractionBody) {
+	async reply(id: string, token: string, body: ReplyInteractionBody, withResponse = false) {
 		//@ts-expect-error
 		const { files, ...rest } = body.data ?? {};
 		//@ts-expect-error
@@ -12,63 +14,76 @@ export class InteractionShorter extends BaseShorter {
 		return this.client.proxy
 			.interactions(id)(token)
 			.callback.post({
+				auth: false,
 				body: BaseInteraction.transformBodyRequest(
 					{
 						type: body.type,
 						data,
 					},
-					parsedFiles,
+					files,
 					this.client,
 				),
 				files: parsedFiles,
+				query: { with_response: withResponse },
 			});
 	}
 
-	fetchResponse(token: string, messageId: string) {
-		return this.client.webhooks.fetchMessage(this.client.applicationId, token, messageId);
+	fetchResponse(token: string, messageId: string, threadId?: string): Promise<WebhookMessageStructure> {
+		return this.client.webhooks.fetchMessage({
+			messageId,
+			token,
+			webhookId: this.client.applicationId,
+			query: threadId ? { thread_id: threadId } : undefined,
+		});
 	}
 
-	fetchOriginal(token: string) {
+	fetchOriginal(token: string): Promise<WebhookMessageStructure> {
 		return this.fetchResponse(token, '@original');
 	}
 
-	async editMessage(token: string, messageId: string, body: InteractionMessageUpdateBodyRequest) {
+	async editMessage(
+		token: string,
+		messageId: string,
+		body: InteractionMessageUpdateBodyRequest,
+	): Promise<WebhookMessageStructure> {
 		const { files, ...data } = body;
 		const parsedFiles = files ? await resolveFiles(files) : undefined;
 		const apiMessage = await this.client.proxy
 			.webhooks(this.client.applicationId)(token)
 			.messages(messageId)
 			.patch({
-				body: BaseInteraction.transformBody(data, parsedFiles, this.client),
+				auth: false,
+				body: BaseInteraction.transformBody(data, files, this.client),
 				files: parsedFiles,
 			});
-		return new WebhookMessage(this.client, apiMessage, this.client.applicationId, token);
+		return Transformers.WebhookMessage(this.client, apiMessage, this.client.applicationId, token);
 	}
 
-	editOriginal(token: string, body: InteractionMessageUpdateBodyRequest) {
+	editOriginal(token: string, body: InteractionMessageUpdateBodyRequest): Promise<WebhookMessageStructure> {
 		return this.editMessage(token, '@original', body);
 	}
 
-	deleteResponse(interactionId: string, token: string, messageId: string) {
+	deleteResponse(token: string, messageId: string) {
 		return this.client.proxy
 			.webhooks(this.client.applicationId)(token)
 			.messages(messageId)
-			.delete()
-			.then(() => this.client.components?.onMessageDelete(messageId === '@original' ? interactionId : messageId));
+			.delete({ auth: false })
+			.then(() => this.client.components.deleteValue(messageId, 'messageDelete'));
 	}
 
-	deleteOriginal(interactionId: string, token: string) {
-		return this.deleteResponse(interactionId, token, '@original');
+	deleteOriginal(token: string) {
+		return this.deleteResponse(token, '@original');
 	}
 
-	async followup(token: string, { files, ...body }: MessageWebhookCreateBodyRequest) {
+	async followup(token: string, { files, ...body }: MessageWebhookCreateBodyRequest): Promise<WebhookMessageStructure> {
 		const parsedFiles = files ? await resolveFiles(files) : undefined;
-		const apiMessage = await this.client.proxy
+		const apiMessage = (await this.client.proxy
 			.webhooks(this.client.applicationId)(token)
 			.post({
-				body: BaseInteraction.transformBody(body, parsedFiles, this.client),
+				auth: false,
+				body: BaseInteraction.transformBody(body, files, this.client),
 				files: parsedFiles,
-			});
-		return new WebhookMessage(this.client, apiMessage, this.client.applicationId, token);
+			})) as RESTPostAPIWebhookWithTokenWaitResult;
+		return Transformers.WebhookMessage(this.client, apiMessage, this.client.applicationId, token);
 	}
 }

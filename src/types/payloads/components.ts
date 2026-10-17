@@ -1,0 +1,737 @@
+import type { Identify, MakeRequired } from '../../common';
+import type { APIAttachment, Snowflake } from '..';
+import type { ChannelType } from '../utils';
+
+/**
+ * https://docs.discord.com/developers/interactions/message-components#component-object
+ */
+export interface APIBaseComponent<T extends ComponentType> {
+	/**
+	 * The type of the component
+	 */
+	type: T;
+}
+
+/**
+ * https://docs.discord.com/developers/interactions/message-components#component-object-component-types
+ */
+export enum ComponentType {
+	/**
+	 * Action Row component
+	 */
+	ActionRow = 1,
+	/**
+	 * Button component
+	 */
+	Button,
+	/**
+	 * Select menu for picking from defined text options
+	 */
+	StringSelect,
+	/**
+	 * Text Input component
+	 */
+	TextInput,
+	/**
+	 * Select menu for users
+	 */
+	UserSelect,
+	/**
+	 * Select menu for roles
+	 */
+	RoleSelect,
+	/**
+	 * Select menu for users and roles
+	 */
+	MentionableSelect,
+	/**
+	 * Select menu for channels
+	 */
+	ChannelSelect,
+	/**
+	 * Section for accessory
+	 */
+	Section,
+	/**
+	 * Text display component
+	 */
+	TextDisplay,
+	/**
+	 * Thumbnail component
+	 */
+	Thumbnail,
+	/**
+	 * Media Gallery component
+	 */
+	MediaGallery,
+	/**
+	 * File component
+	 */
+	File,
+	/**
+	 * Separator component
+	 */
+	Separator,
+	/**
+	 * Container component
+	 */
+	Container = 17,
+	/**
+	 * Label component
+	 */
+	Label,
+	/**
+	 * File upload component
+	 */
+	FileUpload,
+	/**
+	 * Single-choice set of options
+	 */
+	RadioGroup = 21,
+	/**
+	 * Multi-selectable group of checkboxes
+	 */
+	CheckboxGroup,
+	/**
+	 * Single checkbox for yes/no choice
+	 */
+	Checkbox,
+}
+
+/**
+ * https://docs.discord.com/developers/interactions/message-components#action-rows
+ */
+export interface APIActionRowComponent<T extends APIActionRowComponentTypes>
+	extends APIBaseComponent<ComponentType.ActionRow> {
+	/**
+	 * The components in the ActionRow
+	 */
+	components: T[];
+}
+
+/**
+ * https://docs.discord.com/developers/interactions/message-components#buttons
+ */
+export interface APIButtonComponentBase<Style extends ButtonStyle> extends APIBaseComponent<ComponentType.Button> {
+	/**
+	 * The label to be displayed on the button
+	 */
+	label?: string;
+	/**
+	 * The style of the button
+	 */
+	style: Style;
+	/**
+	 * The emoji to display to the left of the text
+	 */
+	emoji?: APIMessageComponentEmoji;
+	/**
+	 * The status of the button
+	 */
+	disabled?: boolean;
+}
+
+export interface APIMessageComponentEmoji {
+	/**
+	 * Emoji id
+	 */
+	id?: Snowflake;
+	/**
+	 * Emoji name
+	 */
+	name?: string;
+	/**
+	 * Whether this emoji is animated
+	 */
+	animated?: boolean;
+}
+
+export interface APIButtonComponentWithCustomId
+	extends APIButtonComponentBase<
+		ButtonStyle.Danger | ButtonStyle.Primary | ButtonStyle.Secondary | ButtonStyle.Success
+	> {
+	/**
+	 * The custom_id to be sent in the interaction when clicked
+	 */
+	custom_id: string;
+}
+
+export interface APIButtonComponentWithURL extends APIButtonComponentBase<ButtonStyle.Link> {
+	/**
+	 * The URL to direct users to when clicked for Link buttons
+	 */
+	url: string;
+}
+
+export interface APIButtonComponentWithSKUId
+	extends Omit<APIButtonComponentBase<ButtonStyle.Premium>, 'custom_id' | 'emoji' | 'label'> {
+	/**
+	 * The id for a purchasable SKU
+	 */
+	sku_id: Snowflake;
+}
+
+export type APIButtonComponent =
+	| APIButtonComponentWithCustomId
+	| APIButtonComponentWithSKUId
+	| APIButtonComponentWithURL;
+
+/**
+ * https://docs.discord.com/developers/interactions/message-components#button-object-button-styles
+ */
+export enum ButtonStyle {
+	Primary = 1,
+	Secondary,
+	Success,
+	Danger,
+	Link,
+	Premium,
+}
+
+/**
+ * https://docs.discord.com/developers/interactions/message-components#text-inputs-text-input-styles
+ */
+export enum TextInputStyle {
+	Short = 1,
+	Paragraph,
+}
+
+/**
+ * https://docs.discord.com/developers/interactions/message-components#select-menus
+ */
+export interface APIBaseSelectMenuComponent<
+	T extends
+		| ComponentType.ChannelSelect
+		| ComponentType.MentionableSelect
+		| ComponentType.RoleSelect
+		| ComponentType.StringSelect
+		| ComponentType.UserSelect,
+> extends APIBaseComponent<T> {
+	/**
+	 * A developer-defined identifier for the select menu, max 100 characters
+	 */
+	custom_id: string;
+	/**
+	 * Custom placeholder text if nothing is selected, max 150 characters
+	 */
+	placeholder?: string;
+	/**
+	 * The minimum number of items that must be chosen; min 0, max 25
+	 *
+	 * @default 1
+	 */
+	min_values?: number;
+	/**
+	 * The maximum number of items that can be chosen; max 25
+	 *
+	 * @default 1
+	 */
+	max_values?: number;
+	/**
+	 * Disable the select
+	 *
+	 * @default false
+	 */
+	disabled?: boolean;
+	/**
+	 * Whether the select is required to answer in a modal
+	 *
+	 * @default true
+	 */
+	required?: boolean;
+}
+
+export interface APIBaseAutoPopulatedSelectMenuComponent<
+	T extends
+		| ComponentType.ChannelSelect
+		| ComponentType.MentionableSelect
+		| ComponentType.RoleSelect
+		| ComponentType.UserSelect,
+	D extends SelectMenuDefaultValueType,
+> extends APIBaseSelectMenuComponent<T> {
+	/**
+	 * List of default values for auto-populated select menu components
+	 */
+	default_values?: APISelectMenuDefaultValue<D>[];
+}
+
+/**
+ * https://docs.discord.com/developers/interactions/message-components#select-menus
+ */
+export interface APIStringSelectComponent<Value extends string = string>
+	extends APIBaseSelectMenuComponent<ComponentType.StringSelect> {
+	/**
+	 * Specified choices in a select menu; max 25
+	 */
+	options: APISelectMenuOption<Value>[];
+	/**
+	 * Whether the string select is required to answer in a modal
+	 *
+	 * @default true
+	 */
+	required?: boolean;
+}
+
+/**
+ * https://docs.discord.com/developers/interactions/message-components#select-menus
+ */
+export type APIUserSelectComponent = APIBaseAutoPopulatedSelectMenuComponent<
+	ComponentType.UserSelect,
+	SelectMenuDefaultValueType.User
+>;
+
+/**
+ * https://docs.discord.com/developers/interactions/message-components#select-menus
+ */
+export type APIRoleSelectComponent = APIBaseAutoPopulatedSelectMenuComponent<
+	ComponentType.RoleSelect,
+	SelectMenuDefaultValueType.Role
+>;
+
+/**
+ * https://docs.discord.com/developers/interactions/message-components#select-menus
+ */
+export type APIMentionableSelectComponent = APIBaseAutoPopulatedSelectMenuComponent<
+	ComponentType.MentionableSelect,
+	SelectMenuDefaultValueType
+>;
+
+/**
+ * https://docs.discord.com/developers/interactions/message-components#select-menus
+ */
+export interface APIChannelSelectComponent
+	extends APIBaseAutoPopulatedSelectMenuComponent<ComponentType.ChannelSelect, SelectMenuDefaultValueType.Channel> {
+	/**
+	 * List of channel types to include in the ChannelSelect component
+	 */
+	channel_types?: ChannelType[];
+}
+
+/**
+ * https://docs.discord.com/developers/interactions/message-components#select-menu-object-select-default-value-structure
+ */
+export enum SelectMenuDefaultValueType {
+	Channel = 'channel',
+	Role = 'role',
+	User = 'user',
+}
+
+/**
+ * https://docs.discord.com/developers/interactions/message-components#select-menu-object-select-default-value-structure
+ */
+export interface APISelectMenuDefaultValue<T extends SelectMenuDefaultValueType> {
+	type: T;
+	id: Snowflake;
+}
+
+export type APIAutoPopulatedSelectMenuComponent =
+	| APIChannelSelectComponent
+	| APIMentionableSelectComponent
+	| APIRoleSelectComponent
+	| APIUserSelectComponent;
+
+/**
+ * https://docs.discord.com/developers/interactions/message-components#select-menus
+ */
+export type APISelectMenuComponent =
+	| APIChannelSelectComponent
+	| APIMentionableSelectComponent
+	| APIRoleSelectComponent
+	| APIStringSelectComponent
+	| APIUserSelectComponent;
+
+/**
+ * https://docs.discord.com/developers/interactions/message-components#select-menu-object-select-option-structure
+ */
+export interface APISelectMenuOption<Value extends string = string> {
+	/**
+	 * The user-facing name of the option (max 100 chars)
+	 */
+	label: string;
+	/**
+	 * The dev-defined value of the option (max 100 chars)
+	 */
+	value: Value;
+	/**
+	 * An additional description of the option (max 100 chars)
+	 */
+	description?: string;
+	/**
+	 * The emoji to display to the left of the option
+	 */
+	emoji?: APIMessageComponentEmoji;
+	/**
+	 * Whether this option should be already-selected by default
+	 */
+	default?: boolean;
+}
+
+/**
+ * https://docs.discord.com/developers/interactions/message-components#text-inputs-text-input-structure
+ */
+export interface APITextInputComponent extends APIBaseComponent<ComponentType.TextInput> {
+	id?: number;
+	/**
+	 * One of text input styles
+	 */
+	style: TextInputStyle;
+	/**
+	 * The custom id for the text input
+	 */
+	custom_id: string;
+	/**
+	 * Placeholder for the text input
+	 */
+	placeholder?: string;
+	/**
+	 * The pre-filled text in the text input
+	 */
+	value?: string;
+	/**
+	 * Minimal length of text input
+	 */
+	min_length?: number;
+	/**
+	 * Maximal length of text input
+	 */
+	max_length?: number;
+	/**
+	 * Whether or not this text input is required or not
+	 */
+	required?: boolean;
+}
+
+/**
+ * https://docs.discord.com/developers/resources/channel#channel-object-channel-flags
+ */
+export enum ChannelFlags {
+	/**
+	 * @unstable This channel flag is currently not documented by Discord but has a known value which we will try to keep up to date.
+	 */
+	GuildFeedRemoved = 1 << 0,
+	/**
+	 * This thread is pinned to the top of its parent forum channel
+	 */
+	Pinned = 1 << 1,
+	/**
+	 * @unstable This channel flag is currently not documented by Discord but has a known value which we will try to keep up to date.
+	 */
+	ActiveChannelsRemoved = 1 << 2,
+	/**
+	 * Whether a tag is required to be specified when creating a thread in a forum channel.
+	 * Tags are specified in the `applied_tags` field
+	 */
+	RequireTag = 1 << 4,
+	/**
+	 * @unstable This channel flag is currently not documented by Discord but has a known value which we will try to keep up to date.
+	 */
+	IsSpam = 1 << 5,
+	/**
+	 * @unstable This channel flag is currently not documented by Discord but has a known value which we will try to keep up to date.
+	 */
+	IsGuildResourceChannel = 1 << 7,
+	/**
+	 * @unstable This channel flag is currently not documented by Discord but has a known value which we will try to keep up to date.
+	 */
+	ClydeAI = 1 << 8,
+	/**
+	 * @unstable This channel flag is currently not documented by Discord but has a known value which we will try to keep up to date.
+	 */
+	IsScheduledForDeletion = 1 << 9,
+	/**
+	 * Whether media download options are hidden.
+	 */
+	HideMediaDownloadOptions = 1 << 15,
+	/**
+	 * This channel is a Spoiler Channel i.e. users must opt in to view its contents.
+	 */
+	IsSpoilerChannel = 1 << 21,
+}
+
+/**
+ * https://docs.discord.com/developers/interactions/message-components#message-components
+ */
+export type APIMessageComponent = APIActionRowComponent<APIMessageActionRowComponent> | APIMessageActionRowComponent;
+export type APIModalComponent = APIActionRowComponent<APIModalActionRowComponent> | APIModalActionRowComponent;
+
+export type APIActionRowComponentTypes = APIMessageActionRowComponent | APIModalActionRowComponent;
+
+/**
+ * https://docs.discord.com/developers/interactions/message-components#message-components
+ */
+export type APIMessageActionRowComponent = APIButtonComponent | APISelectMenuComponent;
+
+export type APIComponents =
+	| APIFileUploadComponent
+	| APIMessageActionRowComponent
+	| APIModalActionRowComponent
+	| APIContainerComponent
+	| APIContainerComponents
+	| APITopLevelComponent
+	| APILabelComponent
+	| APIRadioGroupComponent
+	| APICheckboxGroupComponent
+	| APICheckboxComponent;
+
+// Modal components
+export type APIModalActionRowComponent = APITextInputComponent;
+
+/**
+ * https://docs.discord.com/developers/components/reference#section
+ *
+ * A Section is a top-level layout component that allows you to join text contextually with an accessory.
+ */
+export interface APISectionComponent extends APIBaseComponent<ComponentType.Section> {
+	/** Optional identifier for component */
+	id?: number;
+	/**	One to three text components */
+	components: APITextDisplayComponent[];
+	/** A thumbnail or a button component, with a future possibility of adding more compatible components */
+	accessory: APIButtonComponent | APIThumbnailComponent;
+}
+
+/**
+ * https://docs.discord.com/developers/components/reference#text-display
+ *
+ * A Text Display is a top-level content component that allows you to add text to your message formatted with markdown and mention users and roles. This is similar to the content field of a message, but allows you to add multiple text components, controlling the layout of your message.
+ * Text Displays are only available in messages.
+ */
+export interface APITextDisplayComponent extends APIBaseComponent<ComponentType.TextDisplay> {
+	/** Optional identifier for component */
+	id?: number;
+	/** Text that will be displayed similar to a message */
+	content: string;
+}
+
+/**
+ * https://docs.discord.com/developers/components/reference#thumbnail
+ *
+ * A Thumbnail is a content component that is a small image only usable as an accessory in a section. The preview comes from an url or attachment through the unfurled media item structure.
+ * Thumbnails are only available in messages as an accessory in a section.
+ */
+export interface APIThumbnailComponent extends APIBaseComponent<ComponentType.Thumbnail> {
+	/** Optional identifier for component */
+	id?: number;
+	/**	A url or attachment */
+	media: APIUnfurledMediaItem;
+	/** Alt text for the media */
+	description?: string;
+	/** Whether the thumbnail should be a spoiler (or blurred out). Defaults to false */
+	spoiler?: boolean;
+}
+
+/**
+ * https://docs.discord.com/developers/components/reference#media-gallery
+ *
+ * A Media Gallery is a top-level content component that allows you to display 1-10 media attachments in an organized gallery format. Each item can have optional descriptions and can be marked as spoilers.
+ * Media Galleries are only available in messages.
+ */
+export interface APIMediaGalleryComponent extends APIBaseComponent<ComponentType.MediaGallery> {
+	/** Optional identifier for component */
+	id?: number;
+	/** 1 to 10 media gallery items */
+	items: APIMediaGalleryItems[];
+}
+
+export interface APIMediaGalleryItems {
+	/** A url or attachment */
+	media: APIUnfurledMediaItem;
+	/** Alt text for the media */
+	description?: string;
+	/** Whether the thumbnail should be a spoiler (or blurred out). Defaults to false */
+	spoiler?: boolean;
+}
+
+/**
+ * https://docs.discord.com/developers/components/reference#file
+ *
+ * A File is a top-level component that allows you to display an uploaded file as an attachment to the message and reference it in the component. Each file component can only display 1 attached file, but you can upload multiple files and add them to different file components within your payload. This is similar to the embeds field of a message but allows you to control the layout of your message by using this anywhere as a component.
+ * Files are only available in messages.
+ */
+export interface APIFileComponent extends APIBaseComponent<ComponentType.File> {
+	/** Optional identifier for component */
+	id?: number;
+	/** This unfurled media item is unique in that it only supports attachment references using the attachment://<filename> syntax */
+	file: APIUnfurledMediaItem;
+	/** Whether the media should be a spoiler (or blurred out). Defaults to false */
+	spoiler?: boolean;
+}
+
+/**
+ * https://docs.discord.com/developers/components/reference#separator
+ *
+ * A Separator is a top-level layout component that adds vertical padding and visual division between other components.
+ */
+export interface APISeparatorComponent extends APIBaseComponent<ComponentType.Separator> {
+	/** Optional identifier for component */
+	id?: number;
+	/** Whether a visual divider should be displayed in the component. Defaults to true */
+	divider?: boolean;
+	/** Size of separator padding—1 for small padding, 2 for large padding. Defaults to 1 */
+	spacing?: Spacing;
+}
+
+export enum Spacing {
+	/** For small padding */
+	Small = 1,
+	/** For large padding */
+	Large,
+}
+
+export type APIContainerComponents =
+	| APIActionRowComponent<APIActionRowComponentTypes>
+	| APITextDisplayComponent
+	| APISectionComponent
+	| APIMediaGalleryComponent
+	| APIFileComponent
+	| APISeparatorComponent
+	| APIThumbnailComponent;
+
+/**
+ * https://docs.discord.com/developers/components/reference#container
+ */
+export interface APIContainerComponent extends APIBaseComponent<ComponentType.Container> {
+	/** Optional identifier for component */
+	id?: number;
+	/** Up to 10 components of the type action row, text display, section, media gallery, separator, or file */
+	components: APIContainerComponents[];
+	/** Color for the accent on the container as RGB from 0x000000 to 0xFFFFFF */
+	accent_color?: number;
+	/** Whether the container should be a spoiler (or blurred out). Defaults to false. */
+	spoiler?: boolean;
+}
+
+export type APILabelComponents =
+	| APITextInputComponent
+	| APISelectMenuComponent
+	| APIFileUploadComponent
+	| APIRadioGroupComponent
+	| APICheckboxGroupComponent
+	| APICheckboxComponent;
+
+/**
+ * https://docs.discord.com/developers/components/reference#label
+ */
+export interface APILabelComponent extends APIBaseComponent<ComponentType.Label> {
+	/** Optional identifier for component */
+	id?: number;
+	/** The label text */
+	label: string;
+	/** An optional description textfor the label */
+	description?: string;
+	/** 	The component within the label */
+	component: APILabelComponents;
+}
+
+/**
+ * https://docs.discord.com/developers/reference#file-type-filtering
+ */
+export type FileUploadType = 'audio' | 'image' | 'video' | `.${string}`;
+
+/**
+ * https://docs.discord.com/developers/components/reference#file-upload
+ */
+export interface APIFileUploadComponent extends APIBaseComponent<ComponentType.FileUpload> {
+	/** Optional identifier for component */
+	id?: number;
+	/** ID for the file upload; max 100 characters */
+	custom_id: string;
+	/** Minimum number of items that must be uploaded (defaults to 1); min 0, max 10 */
+	min_values?: number;
+	/** Maximum number of items that can be uploaded (defaults to 1); min 0, max 10 */
+	max_values?: number;
+	/** Whether the file upload is required (defaults to false) */
+	required?: boolean;
+	/** File types to accept; can contain media groups or dot-prefixed file extensions (maximum of 10) */
+	file_types?: FileUploadType[];
+}
+
+/**
+ * https://docs.discord.com/developers/components/reference#radio-group
+ */
+export interface APIRadioGroupComponent extends APIBaseComponent<ComponentType.RadioGroup> {
+	/** Optional identifier for component */
+	id?: number;
+	/** Developer-defined identifier for the input; 1-100 characters */
+	custom_id: string;
+	/**	List of options to show; min 2, max 10 */
+	options: APIRadioGroupOption[];
+	/** Whether a selection is required to submit the modal (defaults to true) */
+	required?: boolean;
+}
+
+/**
+ * https://docs.discord.com/developers/components/reference#radio-group-option-structure
+ */
+export interface APIRadioGroupOption {
+	/** Dev-defined value of the option; max 100 characters */
+	value: string;
+	/** User-facing name of the option; max 100 characters */
+	label: string;
+	/** Additional description of the option; max 100 characters */
+	description?: string;
+	/** Shows the option as selected by default */
+	default?: boolean;
+}
+
+/**
+ * https://docs.discord.com/developers/components/reference#checkbox-group
+ */
+export interface APICheckboxGroupComponent extends APIBaseComponent<ComponentType.CheckboxGroup> {
+	/** Optional identifier for component */
+	id?: number;
+	/** Developer-defined identifier for the input; 1-100 characters */
+	custom_id: string;
+	/** List of options to show; min 2, max 10 */
+	options: APICheckboxGroupOption[];
+	/** Minimum number of items that must be chosen; min 0, max 10 (defaults to 1); if set to 0 required must be false */
+	min_values?: number;
+	/** Maximum number of items that can be chosen; min 1, max 10 (defaults to the number of options) */
+	max_values?: number;
+	/** Whether a selection is required to submit the modal (defaults to true) */
+	required?: boolean;
+}
+
+/**
+ * https://docs.discord.com/developers/components/reference#checkbox-group-option-structure
+ */
+export interface APICheckboxGroupOption {
+	/** Dev-defined value of the option; max 100 characters */
+	value: string;
+	/** User-facing name of the option; max 100 characters */
+	label: string;
+	/** Additional description of the option; max 100 characters */
+	description?: string;
+	/** Shows the option as selected by default */
+	default?: boolean;
+}
+
+/**
+ * https://docs.discord.com/developers/components/reference#checkbox
+ */
+export interface APICheckboxComponent extends APIBaseComponent<ComponentType.Checkbox> {
+	/** Optional identifier for component */
+	id?: number;
+	/** Developer-defined identifier for the input; 1-100 characters */
+	custom_id: string;
+	/** Whether the checkbox is selected by default */
+	default?: boolean;
+}
+
+/**
+ * https://docs.discord.com/developers/components/reference#unfurled-media-item-structure
+ */
+export interface APIUnfurledMediaItem
+	extends Identify<
+		MakeRequired<Partial<Pick<APIAttachment, 'url' | 'proxy_url' | 'height' | 'width' | 'content_type'>>, 'url'>
+	> {}
+
+export type APITopLevelComponent =
+	| APIContainerComponent
+	| APIActionRowComponent<APIActionRowComponentTypes>
+	| APIFileComponent
+	| APIMediaGalleryComponent
+	| APISectionComponent
+	| APISeparatorComponent
+	| APITextDisplayComponent
+	| APILabelComponent;

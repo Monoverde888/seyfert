@@ -4,6 +4,9 @@ import type { GatewayRoutes } from './gateway';
 import type { GuildRoutes } from './guilds';
 import type { InteractionRoutes } from './interactions';
 import type { InviteRoutes } from './invites';
+import type { OAuth2Routes } from './oauth2';
+import type { SKURoutes } from './skus';
+import type { SoundboardRoutes } from './soundboard';
 import type { StageInstanceRoutes } from './stage-instances';
 import type { StickerRoutes } from './stickers';
 import type { UserRoutes } from './users';
@@ -12,14 +15,18 @@ import type { WebhookRoutes } from './webhooks';
 
 export * from './cdn';
 
-export type APIRoutes = ApplicationRoutes &
-	ChannelRoutes &
-	GatewayRoutes &
-	GuildRoutes &
-	InteractionRoutes &
-	InviteRoutes &
-	StageInstanceRoutes &
-	StickerRoutes &
-	UserRoutes &
-	VoiceRoutes &
-	WebhookRoutes;
+export interface APIRoutes
+	extends ApplicationRoutes,
+		ChannelRoutes,
+		GatewayRoutes,
+		GuildRoutes,
+		InteractionRoutes,
+		InviteRoutes,
+		OAuth2Routes,
+		SKURoutes,
+		StageInstanceRoutes,
+		StickerRoutes,
+		UserRoutes,
+		VoiceRoutes,
+		WebhookRoutes,
+		SoundboardRoutes {}

@@ -1,28 +1,30 @@
-import type { APIOverwrite } from 'discord-api-types/v10';
-import type { ReturnCache } from '../..';
-import { fakePromise } from '../../common/it/utils';
+import type { CacheFrom, ReturnCache } from '../..';
+import { fakePromise } from '../../common/it/fake-promise';
 import { PermissionsBitField } from '../../structures/extra/Permissions';
+import type { APIOverwrite, OverwriteType } from '../../types';
 import { GuildRelatedResource } from './default/guild-related';
 
-export class Overwrites extends GuildRelatedResource {
+export class Overwrites extends GuildRelatedResource<any, APIOverwrite[]> {
 	namespace = 'overwrite';
 
 	//@ts-expect-error
-	filter(data: APIOverwrite[], id: string, guild_id?: string) {
+	filter(data: APIOverwrite[], id: string, guild_id: string, from: CacheFrom) {
 		return true;
 	}
 
 	parse(data: any[], _id: string, guild_id: string) {
-		data.forEach(x => {
-			x.guild_id = guild_id;
-		});
-		return data;
+		return data.map(x => ({ ...x, guild_id }));
+	}
+
+	raw(id: string): ReturnCache<(APIOverwrite & { guild_id: string })[] | undefined> {
+		return super.get(id);
 	}
 
 	override get(
 		id: string,
 	): ReturnCache<
-		{ type: number; id: string; deny: PermissionsBitField; allow: PermissionsBitField; guildId: string }[] | undefined
+		| { type: OverwriteType; id: string; deny: PermissionsBitField; allow: PermissionsBitField; guildId: string }[]
+		| undefined
 	> {
 		return fakePromise(super.get(id) as (APIOverwrite & { guild_id: string })[] | undefined).then(rawOverwrites =>
 			rawOverwrites
@@ -38,9 +40,9 @@ export class Overwrites extends GuildRelatedResource {
 	}
 
 	override values(
-		guild: string,
+		guild: '*' | (string & {}),
 	): ReturnCache<
-		{ type: number; id: string; deny: PermissionsBitField; allow: PermissionsBitField; guildId: string }[][]
+		{ type: OverwriteType; id: string; deny: PermissionsBitField; allow: PermissionsBitField; guildId: string }[][]
 	> {
 		return fakePromise(super.values(guild) as (APIOverwrite & { guild_id: string })[][]).then(values =>
 			values.map(rawOverwrites =>
@@ -55,9 +57,13 @@ export class Overwrites extends GuildRelatedResource {
 		);
 	}
 
+	valuesRaw(guild: string): ReturnCache<(APIOverwrite & { guild_id: string })[][]> {
+		return super.values(guild);
+	}
+
 	override bulk(
 		ids: string[],
-	): ReturnCache<{ type: number; id: string; deny: PermissionsBitField; allow: PermissionsBitField }[][]> {
+	): ReturnCache<{ type: OverwriteType; id: string; deny: PermissionsBitField; allow: PermissionsBitField }[][]> {
 		return fakePromise(super.bulk(ids) as (APIOverwrite & { guild_id: string })[][]).then(values =>
 			values.map(rawOverwrites =>
 				rawOverwrites.map(rawOverwrite => ({
@@ -69,5 +75,9 @@ export class Overwrites extends GuildRelatedResource {
 				})),
 			),
 		);
+	}
+
+	bulkRaw(ids: string[]): ReturnCache<(APIOverwrite & { guild_id: string })[][]> {
+		return super.bulk(ids);
 	}
 }

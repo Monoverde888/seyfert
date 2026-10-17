@@ -1,14 +1,14 @@
-import type { APIMessage, APIUser } from 'discord-api-types/v10';
+import type { CacheFrom, MessageData, ReturnCache } from '../..';
+import { type MessageStructure, Transformers } from '../../client/transformers';
+import { fakePromise } from '../../common/it/fake-promise';
+import type { APIMessage, APIUser } from '../../types';
 import { GuildRelatedResource } from './default/guild-related';
-import type { MessageData, ReturnCache } from '../..';
-import { fakePromise } from '../../common';
-import { Message } from '../../structures';
 
-export class Messages extends GuildRelatedResource {
+export class Messages extends GuildRelatedResource<any, APIMessage> {
 	namespace = 'message';
 
 	//@ts-expect-error
-	filter(data: MessageData, id: string, channel_id?: string) {
+	filter(data: MessageData, id: string, channel_id: string, from: CacheFrom) {
 		return true;
 	}
 
@@ -19,50 +19,87 @@ export class Messages extends GuildRelatedResource {
 		return rest;
 	}
 
-	override get(id: string): ReturnCache<Message | undefined> {
+	override get(id: string): ReturnCache<MessageStructure | undefined> {
 		return fakePromise(super.get(id) as APIMessageResource | undefined).then(rawMessage => {
 			return this.cache.users && rawMessage?.user_id
 				? fakePromise(this.cache.adapter.get(this.cache.users.hashId(rawMessage.user_id)) as APIUser | undefined).then(
 						user => {
-							return user ? new Message(this.client, { ...rawMessage!, author: user }) : undefined;
+							return user ? Transformers.Message(this.client, { ...rawMessage, author: user }) : undefined;
 						},
 					)
 				: undefined;
 		});
 	}
 
-	override bulk(ids: string[]): ReturnCache<Message[]> {
-		return fakePromise(super.bulk(ids) as APIMessageResource[]).then(
-			messages =>
-				messages
-					.map(rawMessage => {
-						return this.cache.users && rawMessage?.user_id
-							? fakePromise(
-									this.cache.adapter.get(this.cache.users.hashId(rawMessage.user_id)) as APIUser | undefined,
-								).then(user => {
-									return user ? new Message(this.client, { ...rawMessage!, author: user }) : undefined;
-								})
-							: undefined;
-					})
-					.filter(Boolean) as Message[],
-		);
+	raw(id: string): ReturnCache<APIMessageResource | undefined> {
+		return super.get(id);
 	}
 
-	override values(guild: string): ReturnCache<Message[]> {
-		return fakePromise(super.values(guild) as APIMessageResource[]).then(messages => {
+	override bulk(ids: string[]): ReturnCache<MessageStructure[]> {
+		return fakePromise(super.bulk(ids) as APIMessageResource[]).then(messages => {
 			const hashes: (string | undefined)[] = this.cache.users
-				? messages.map(x => (x.user_id ? this.cache.users!.hashId(x.user_id) : undefined))
+				? messages.map(x => (x.user_id ? this.cache.users?.hashId(x.user_id) : undefined))
 				: [];
-			return fakePromise(this.cache.adapter.get(hashes.filter(Boolean) as string[]) as APIUser[]).then(users => {
-				return messages
-					.map(message => {
-						const user = users.find(user => user.id === message.user_id);
-						return user ? new Message(this.client, { ...message, author: user }) : undefined;
-					})
-					.filter(Boolean) as Message[];
+			return fakePromise(this.cache.adapter.bulkGet(hashes.filter(x => x !== undefined)) as APIUser[]).then(users => {
+				const userMap = new Map<string, APIUser>();
+				for (const user of users) userMap.set(user.id, user);
+				const result: MessageStructure[] = [];
+				for (const message of messages) {
+					const user = message.user_id ? userMap.get(message.user_id) : undefined;
+					if (user) result.push(Transformers.Message(this.client, { ...message, author: user }));
+				}
+				return result;
 			});
 		});
 	}
+
+	bulkRaw(ids: string[]): ReturnCache<APIMessageResource[]> {
+		return super.bulk(ids);
+	}
+
+	override values(channel: '*' | (string & {})): ReturnCache<MessageStructure[]> {
+		return fakePromise(super.values(channel) as APIMessageResource[]).then(messages => {
+			const hashes: (string | undefined)[] = this.cache.users
+				? messages.map(x => (x.user_id ? this.cache.users?.hashId(x.user_id) : undefined))
+				: [];
+			return fakePromise(this.cache.adapter.bulkGet(hashes.filter(x => x !== undefined)) as APIUser[]).then(users => {
+				const userMap = new Map<string, APIUser>();
+				for (const user of users) userMap.set(user.id, user);
+				const result: MessageStructure[] = [];
+				for (const message of messages) {
+					const user = message.user_id ? userMap.get(message.user_id) : undefined;
+					if (user) result.push(Transformers.Message(this.client, { ...message, author: user }));
+				}
+				return result;
+			});
+		});
+	}
+
+	valuesRaw(channel: string): ReturnCache<APIMessageResource[]> {
+		return super.values(channel);
+	}
+
+	keys(channel: '*' | (string & {})) {
+		return super.keys(channel);
+	}
+
+	private _buildCacheEntries(from: CacheFrom, keys: [string, any][], channelId: string) {
+		return keys.map(([id, value]) => [from, 'messages', value, id, channelId] as const);
+	}
+
+	override async set(from: CacheFrom, messageId: string, channelId: string, data: any): Promise<void>;
+	override async set(from: CacheFrom, messageDataArray: [string, any][], channelId: string): Promise<void>;
+	override async set(from: CacheFrom, __keys: string | [string, any][], channelId: string, data?: any) {
+		const keys: [string, any][] = Array.isArray(__keys) ? __keys : [[__keys, data]];
+		await this.cache.bulkSet(this._buildCacheEntries(from, keys, channelId));
+	}
+
+	override async patch(from: CacheFrom, messageId: string, channelId: string, data: any): Promise<void>;
+	override async patch(from: CacheFrom, messageDataArray: [string, any][], channelId: string): Promise<void>;
+	override async patch(from: CacheFrom, __keys: string | [string, any][], channelId: string, data?: any) {
+		const keys: [string, any][] = Array.isArray(__keys) ? __keys : [[__keys, data]];
+		await this.cache.bulkPatch(this._buildCacheEntries(from, keys, channelId));
+	}
 }
 
-export type APIMessageResource = Omit<APIMessage, 'author'> & { user_id?: string };
+export type APIMessageResource = Omit<APIMessage, 'author' | 'member'> & { user_id?: string };

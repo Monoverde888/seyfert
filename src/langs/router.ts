@@ -1,10 +1,8 @@
 import type { DefaultLocale } from '../commands';
+import { SeyfertError } from '../common';
 
 export const LangRouter = (userLocale: string, defaultLang: string, langs: Partial<Record<string, any>>) => {
-	function createProxy(
-		route = [] as string[],
-		args: any[] = [],
-	): __InternalParseLocale<DefaultLocale> & { get(locale?: string): DefaultLocale } {
+	function createProxy(route = [] as string[], args: any[] = []): SeyfertLocale {
 		const noop = () => {
 			return;
 		};
@@ -12,13 +10,16 @@ export const LangRouter = (userLocale: string, defaultLang: string, langs: Parti
 			get: (_, key: string) => {
 				if (key === 'get') {
 					function getValue(locale?: string) {
-						if (typeof locale === 'undefined') throw new Error('Undefined locale');
+						if (typeof locale === 'undefined')
+							throw new SeyfertError('UNDEFINED_LOCALE', { metadata: { detail: 'Undefined locale' } });
 						let value = langs[locale] as Record<string, any>;
+						if (typeof value === 'undefined')
+							throw new SeyfertError('INTERNAL_ERROR', { metadata: { detail: `Locale "${locale}" not found` } });
 						for (const i of route) value = value[i];
 						return value;
 					}
 					return (locale?: string) => {
-						let result;
+						let result: unknown;
 						try {
 							result = getValue(locale ?? userLocale);
 						} catch {
@@ -50,5 +51,13 @@ export type __InternalParseLocale<T extends Record<string, any>> = {
 					: never;
 };
 
+/**
+ * The `ctx.t` / `client.t(...)` accessor type. Kept as a named alias so that inferred return
+ * types (BaseClient.t, the context `t` getters, ...) emit a reference to `DefaultLocale` instead
+ * of eagerly baking it to `{}` at build time (where `SeyfertRegistry` has no `langs`), which left
+ * consumers with an untyped `ctx.t`.
+ */
+export type SeyfertLocale = __InternalParseLocale<DefaultLocale> & { get(locale?: string): DefaultLocale };
+
 export type ParseLocales<T extends Record<string, any>> = T;
-/**Idea inspiration from: FreeAoi */
+/**Idea inspiration from: FreeAoi | Fixed by: Drylozu */

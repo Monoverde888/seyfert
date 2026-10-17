@@ -1,89 +1,122 @@
 {
-	"$schema": "https://biomejs.dev/schemas/1.7.3/schema.json",
-	"linter": {
+	"$schema": "https://biomejs.dev/schemas/2.5.3/schema.json",
+	"vcs": {
 		"enabled": true,
-		"rules": {
-			"all": true,
-			"suspicious": {
-				"noExplicitAny": "off",
-				"noAssignInExpressions": "off",
-				"noUnsafeDeclarationMerging": "off",
-				"noRedeclare": "off",
-				"noEmptyInterface": "off",
-				"noConfusingVoidType": "off",
-				"noImplicitAnyLet": "off",
-				"noEmptyBlockStatements": "off",
-				"useAwait": "off",
-				"noConsoleLog": "off"
-			},
-			"style": {
-				"noNonNullAssertion": "off",
-				"noParameterAssign": "off",
-				"useExportType": "error",
-				"useImportType": "error",
-				"useNodejsImportProtocol": "error",
-				"useNamingConvention": "off",
-				"noParameterProperties": "off",
-				"useFilenamingConvention": "off",
-				"noDefaultExport": "off",
-				"noNamespaceImport": "off",
-				"useSingleCaseStatement": "off",
-				"useBlockStatements": "off"
-			},
-			"correctness": {
-				"noUnusedVariables": "off"
-			},
-			"nursery": {
-				"useImportRestrictions": "off"
-			},
-			"complexity": {
-				"noUselessLoneBlockStatements": "warn",
-				"noBannedTypes": "off",
-				"noForEach": "off",
-				"noUselessConstructor": "off",
-				"noThisInStatic": "off",
-				"noExcessiveCognitiveComplexity": "off",
-				"noVoid": "off",
-				"noStaticOnlyClass": "off"
-			},
-			"a11y": {
-				"all": false
-			},
-			"performance": {
-				"noDelete": "off",
-				"noBarrelFile": "off",
-				"noReExportAll": "off"
-			}
-		}
+		"clientKind": "git",
+		"useIgnoreFile": true,
+		"defaultBranch": "main"
 	},
-	"json": {
-		"formatter": {
-			"enabled": true,
-			"indentWidth": 2,
-			"lineWidth": 80
-		}
+	"files": {
+		"ignoreUnknown": true,
+		"includes": [
+			"**/src/**",
+			"**/tests/**",
+			"/biome.json",
+			"/commitlint.config.js",
+			"/package.json",
+			"/tsconfig.json",
+			"!/node_modules/",
+			"!/build",
+			"!/lib",
+			"!/__test__",
+			"!/.vscode"
+		]
 	},
 	"formatter": {
 		"enabled": true,
-		"indentWidth": 2,
 		"indentStyle": "tab",
+		"indentWidth": 2,
 		"lineWidth": 120,
-		"lineEnding": "crlf",
+		"lineEnding": "lf",
 		"formatWithErrors": true
+	},
+	"assist": {
+		"actions": {
+			"source": {
+				"organizeImports": "on"
+			}
+		}
+	},
+	"linter": {
+		"enabled": true,
+		"rules": {
+			"preset": "recommended",
+			"security": {
+				"noGlobalEval": "off"
+			},
+			"suspicious": {
+				"preset": "none",
+				"noExplicitAny": "off",
+				"noAssignInExpressions": "off",
+				"useAwait": "off",
+				"noConfusingVoidType": "off",
+				"noAsyncPromiseExecutor": "off",
+				"noUnsafeDeclarationMerging": "off",
+				"noEmptyInterface": "off",
+				"noThenProperty": "off",
+				"noShadowRestrictedNames": "off",
+				"useIterableCallbackReturn": "off"
+			},
+			"correctness": {
+				"noUnusedVariables": "off",
+				"noNodejsModules": "off",
+				"useImportExtensions": "off",
+				"noUnusedFunctionParameters": "off"
+			},
+			"style": {
+				"noDefaultExport": "off",
+				"useBlockStatements": "off",
+				"noParameterProperties": "off",
+				"useNamingConvention": "off",
+				"noNonNullAssertion": "off",
+				"useForOf": "off",
+				"useDefaultSwitchClause": "off",
+				"noParameterAssign": "off",
+				"useFilenamingConvention": "off",
+				"useEnumInitializers": "off",
+				"useExplicitLengthCheck": "off",
+				"useImportType": "error"
+			},
+			"complexity": {
+				"noForEach": "off",
+				"noExcessiveCognitiveComplexity": "off",
+				"noUselessConstructor": "off",
+				"noBannedTypes": "off"
+			},
+			"performance": {
+				"noBarrelFile": "off",
+				"noDelete": "off",
+				"noDynamicNamespaceImportAccess": "off",
+				"noReExportAll": "off",
+				"useTopLevelRegex": "off",
+				"noNamespaceImport": "off"
+			}
+		}
 	},
 	"javascript": {
 		"formatter": {
 			"quoteStyle": "single",
+			"semicolons": "always",
 			"arrowParentheses": "asNeeded",
-			"bracketSameLine": true,
-			"semicolons": "always"
+			"bracketSameLine": true
 		}
 	},
-	"files": {
-		"ignoreUnknown": true,
-		"ignore": ["node_modules/", "build", "lib", "__test__"]
-	},
-	"organizeImports": {
-		"enabled": false
-	}
+	"overrides": [
+		{
+			"includes": ["tests/**/*-contract.ts", "tests/command-declare-name-combinations.ts"],
+			"formatter": {
+				"enabled": false
+			}
+		},
+		{
+			"includes": ["tests/public-entrypoint-cycles.test.mts"],
+			"assist": {
+				"actions": {
+					"source": {
+						"organizeImports": "off"
+					}
+				}
+			}
+		}
+	]
 }

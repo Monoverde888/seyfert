@@ -1,10 +1,12 @@
+import type { ReturnCache } from '../cache';
+import type { AutoModerationRuleStructure, GuildMemberStructure, GuildStructure } from '../client';
+import type { UsingClient } from '../commands';
+import type { MethodContext, ObjectToLower } from '../common';
 import type {
 	APIAutoModerationRule,
 	RESTPatchAPIAutoModerationRuleJSONBody,
 	RESTPostAPIAutoModerationRuleJSONBody,
-} from 'discord-api-types/v10';
-import type { UsingClient } from '../commands';
-import { toCamelCase, type MethodContext, type ObjectToLower } from '../common';
+} from '../types';
 import { DiscordBase } from './extra/DiscordBase';
 
 export interface AutoModerationRule extends ObjectToLower<APIAutoModerationRule> {}
@@ -14,19 +16,29 @@ export class AutoModerationRule extends DiscordBase<APIAutoModerationRule> {
 		super(client, data);
 	}
 
-	fetchCreator(force = false) {
+	fetchCreator(force = false): Promise<GuildMemberStructure> {
 		return this.client.members.fetch(this.guildId, this.creatorId, force);
 	}
 
-	guild(force = false) {
-		return this.client.guilds.fetch(this.guildId, force);
+	guild(mode?: 'rest' | 'flow'): Promise<GuildStructure<'cached' | 'api'>>;
+	guild(mode: 'cache'): ReturnCache<GuildStructure<'cached'> | undefined>;
+	guild(mode: 'cache' | 'rest' | 'flow' = 'flow'): any {
+		switch (mode) {
+			case 'cache':
+				return (
+					this.client.cache.guilds?.get(this.guildId) ||
+					(this.client.cache.adapter.isAsync ? (Promise.resolve() as any) : undefined)
+				);
+			default:
+				return this.client.guilds.fetch(this.guildId, mode === 'rest');
+		}
 	}
 
-	fetch() {
+	fetch(): Promise<AutoModerationRuleStructure> {
 		return this.client.guilds.moderation.fetch(this.guildId, this.id);
 	}
 
-	edit(body: ObjectToLower<RESTPatchAPIAutoModerationRuleJSONBody>, reason?: string) {
+	edit(body: RESTPatchAPIAutoModerationRuleJSONBody, reason?: string): Promise<AutoModerationRuleStructure> {
 		return this.client.guilds.moderation.edit(this.guildId, this.id, body, reason);
 	}
 
@@ -36,12 +48,16 @@ export class AutoModerationRule extends DiscordBase<APIAutoModerationRule> {
 
 	static methods({ client, guildId }: MethodContext<{ guildId: string }>) {
 		return {
-			list: () => client.guilds.moderation.list(guildId),
-			create: (body: RESTPostAPIAutoModerationRuleJSONBody) => client.guilds.moderation.create(guildId, body),
+			list: (): Promise<AutoModerationRuleStructure[]> => client.guilds.moderation.list(guildId),
+			create: (body: RESTPostAPIAutoModerationRuleJSONBody): Promise<AutoModerationRuleStructure> =>
+				client.guilds.moderation.create(guildId, body),
 			delete: (ruleId: string, reason?: string) => client.guilds.moderation.delete(guildId, ruleId, reason),
-			fetch: (ruleId: string) => client.guilds.moderation.fetch(guildId, ruleId),
-			edit: (ruleId: string, body: RESTPatchAPIAutoModerationRuleJSONBody, reason?: string) =>
-				client.guilds.moderation.edit(guildId, ruleId, toCamelCase(body), reason),
+			fetch: (ruleId: string): Promise<AutoModerationRuleStructure> => client.guilds.moderation.fetch(guildId, ruleId),
+			edit: (
+				ruleId: string,
+				body: RESTPatchAPIAutoModerationRuleJSONBody,
+				reason?: string,
+			): Promise<AutoModerationRuleStructure> => client.guilds.moderation.edit(guildId, ruleId, body, reason),
 		};
 	}
 }

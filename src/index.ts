@@ -1,4 +1,5 @@
-import { GatewayIntentBits } from 'discord-api-types/gateway/v10';
+export * from './client';
+
 import {
 	BaseClient,
 	type BaseClientOptions,
@@ -7,30 +8,58 @@ import {
 	type RuntimeConfig,
 	type RuntimeConfigHTTP,
 } from './client/base';
-import type { CustomEventsKeys, ClientNameEvents, EventContext } from './events';
-import { isCloudfareWorker } from './common';
-export { Logger, PermissionStrings, Watcher, Formatter } from './common';
-//
-export { Collection, LimitedCollection } from './collection';
+import { resolveGatewayIntents } from './client/intents';
+import { type Awaitable, isCloudflareWorker } from './common';
+import type { ClientNameEvents, CustomEventsKeys, ResolveEventParams } from './events';
+
 //
 export * from './api';
 export * from './builders';
 export * from './cache';
+//
+export { Collection, LimitedCollection, type LimitedCollectionData } from './collection';
 export * from './commands';
+export {
+	type AssignFilenameCallback,
+	type BanOptions,
+	type ChannelLink,
+	type CustomizeLoggerCallback,
+	createValidationMetadata,
+	EmbedColors,
+	Formatter,
+	HeadingLevel,
+	Logger,
+	type LoggerOptions,
+	LogLevels,
+	type MessageLink,
+	type OAuth2URLOptions,
+	PermissionStrings,
+	type PropWhen,
+	SeyfertError,
+	type SeyfertErrorCode,
+	SeyfertErrorMessages,
+	type StructPropState,
+	type StructStates,
+	type Timestamp,
+	TimestampStyle,
+} from './common';
 export * from './components';
 export * from './events';
 export * from './langs';
 //
-export { ShardManager, WorkerManager } from './websocket/discord';
-//
 export * from './structures';
+export { GuildRole } from './structures/GuildRole';
+export * from './types';
 //
-export * from './client';
-//
-
-export function throwError(msg: string): never {
-	throw new Error(msg);
-}
+export { ShardManager, WorkerManager } from './websocket/discord';
+export type { ShardData, ShardManagerOptions, WorkerData, WorkerManagerOptions } from './websocket/discord/shared';
+export type { WorkerInfo, WorkerShardInfo } from './websocket/discord/worker';
+export type {
+	ManagerMessages,
+	ManagerSendCacheResult,
+	SerializedWorkerError,
+	SerializedWorkerValue,
+} from './websocket/discord/workermanager';
 
 /**
  * Creates an event with the specified data and run function.
@@ -48,7 +77,7 @@ export function throwError(msg: string): never {
  */
 export function createEvent<E extends ClientNameEvents | CustomEventsKeys>(data: {
 	data: { name: E; once?: boolean };
-	run: (...args: EventContext<{ data: { name: E } }>) => any;
+	run: (...args: ResolveEventParams<E>) => Awaitable<unknown>;
 }) {
 	data.data.once ??= false;
 	return data;
@@ -64,15 +93,7 @@ export const config = {
 	bot(data: RuntimeConfig) {
 		return {
 			...data,
-			intents:
-				'intents' in data
-					? typeof data.intents === 'number'
-						? data.intents
-						: data.intents?.reduce<number>(
-								(pr, acc) => pr | (typeof acc === 'number' ? acc : GatewayIntentBits[acc]),
-								0,
-							) ?? 0
-					: 0,
+			intents: resolveGatewayIntents(data.intents),
 		} as InternalRuntimeConfig;
 	},
 	/**
@@ -86,7 +107,7 @@ export const config = {
 			port: 8080,
 			...data,
 		} as InternalRuntimeConfigHTTP;
-		if (isCloudfareWorker()) BaseClient._seyfertConfig = obj;
+		if (isCloudflareWorker()) BaseClient._seyfertCfWorkerConfig = obj;
 		return obj;
 	},
 };

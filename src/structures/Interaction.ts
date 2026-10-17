@@ -1,11 +1,53 @@
+import type { RawFile } from '../api';
 import {
-	type APIActionRowComponent,
+	ActionRow,
+	Attachment,
+	AttachmentBuilder,
+	Modal,
+	PollBuilder,
+	resolveAttachment,
+	resolveFiles,
+} from '../builders';
+import { Label } from '../builders/Label';
+import type { ReturnCache } from '../cache';
+import {
+	type EntitlementStructure,
+	type GuildRoleStructure,
+	type GuildStructure,
+	type InteractionGuildMemberStructure,
+	type MessageStructure,
+	type OptionResolverStructure,
+	Transformers,
+	type UserStructure,
+	type WebhookMessageStructure,
+} from '../client/transformers';
+import type { ContextOptionsResolved, UsingClient } from '../commands';
+import {
+	type ComponentInteractionMessageUpdate,
+	type InteractionCreateBodyRequest,
+	type InteractionMessageUpdateBodyRequest,
+	type MessageCreateBodyRequest,
+	type MessageUpdateBodyRequest,
+	type MessageWebhookCreateBodyRequest,
+	type ModalCreateBodyRequest,
+	type ModalCreateOptions,
+	type ObjectToLower,
+	type OmitInsert,
+	type ResolverProps,
+	SeyfertError,
+	type ToClass,
+	toCamelCase,
+	type When,
+} from '../common';
+import { mix } from '../deps/mixer';
+import {
 	type APIApplicationCommandAutocompleteInteraction,
 	type APIApplicationCommandInteraction,
 	type APIBaseInteraction,
 	type APIChatInputApplicationCommandInteraction,
 	type APIChatInputApplicationCommandInteractionData,
 	type APICommandAutocompleteInteractionResponseCallbackData,
+	type APIEntryPointCommandInteraction,
 	type APIInteraction,
 	type APIInteractionResponse,
 	type APIInteractionResponseChannelMessageWithSource,
@@ -25,37 +67,20 @@ import {
 	type APIMessageUserSelectInteractionData,
 	type APIModalSubmission,
 	type APIModalSubmitInteraction,
-	type APITextInputComponent,
 	type APIUserApplicationCommandInteraction,
 	type APIUserApplicationCommandInteractionData,
 	ApplicationCommandType,
 	ComponentType,
 	type GatewayInteractionCreateDispatchData,
+	type InteractionCallbackData,
+	type InteractionCallbackResourceActivity,
 	InteractionResponseType,
 	InteractionType,
 	type MessageFlags,
+	type ModalSubmitInsideLabelData,
 	type RESTPostAPIInteractionCallbackJSONBody,
-	type RESTAPIAttachment,
-} from 'discord-api-types/v10';
-import { mix } from 'ts-mixer';
-import type { RawFile } from '../api';
-import { ActionRow, Embed, Modal, PollBuilder, resolveAttachment, resolveFiles } from '../builders';
-import { OptionResolver, type ContextOptionsResolved, type UsingClient } from '../commands';
-import type { ObjectToLower, OmitInsert, ToClass, When } from '../common';
-import type {
-	ComponentInteractionMessageUpdate,
-	InteractionCreateBodyRequest,
-	InteractionMessageUpdateBodyRequest,
-	MessageCreateBodyRequest,
-	MessageUpdateBodyRequest,
-	MessageWebhookCreateBodyRequest,
-	ModalCreateBodyRequest,
-} from '../common/types/write';
-import { InteractionGuildMember, type AllChannels } from './';
-import { GuildRole } from './GuildRole';
-import { Message, type WebhookMessage } from './Message';
-import { User } from './User';
-import channelFrom from './channels';
+} from '../types';
+import { type AllChannels, channelFrom, type ResolvedChannel } from './';
 import { DiscordBase } from './extra/DiscordBase';
 import { PermissionsBitField } from './extra/Permissions';
 
@@ -65,9 +90,9 @@ export type ReplyInteractionBody =
 			type: InteractionResponseType.ChannelMessageWithSource | InteractionResponseType.UpdateMessage;
 			data: InteractionCreateBodyRequest | InteractionMessageUpdateBodyRequest | ComponentInteractionMessageUpdate;
 	  }
+	| { type: InteractionResponseType.LaunchActivity }
 	| Exclude<RESTPostAPIInteractionCallbackJSONBody, APIInteractionResponsePong>;
 
-/** @internal */
 export type __InternalReplyFunction = (_: { body: APIInteractionResponse; files?: RawFile[] }) => Promise<any>;
 
 export interface BaseInteraction
@@ -82,12 +107,15 @@ export class BaseInteraction<
 	FromGuild extends boolean = boolean,
 	Type extends APIInteraction = APIInteraction,
 > extends DiscordBase<Type> {
-	user: User;
-	member!: When<FromGuild, InteractionGuildMember, undefined>;
+	user: UserStructure;
+	member!: When<FromGuild, InteractionGuildMemberStructure, undefined>;
 	channel?: AllChannels;
-	message?: Message;
-	replied?: Promise<boolean> | boolean;
-	appPermissions?: PermissionsBitField;
+	message?: MessageStructure;
+	replied?: boolean;
+	private _repliedPromise?: Promise<unknown>;
+	deferred?: boolean;
+	appPermissions: PermissionsBitField;
+	entitlements: EntitlementStructure[];
 
 	constructor(
 		readonly client: UsingClient,
@@ -96,28 +124,28 @@ export class BaseInteraction<
 	) {
 		super(client, interaction);
 		if (interaction.member) {
-			this.member = new InteractionGuildMember(
+			this.member = Transformers.InteractionGuildMember(
 				client,
 				interaction.member,
-				interaction.member!.user,
+				interaction.member.user,
 				interaction.guild_id!,
 			) as never;
 		}
 		if (interaction.message) {
-			this.message = new Message(client, interaction.message);
+			this.message = Transformers.Message(client, interaction.message);
 		}
-		if (interaction.app_permissions) {
-			this.appPermissions = new PermissionsBitField(Number(interaction.app_permissions));
-		}
-		if (interaction.channel) {
+		this.appPermissions = new PermissionsBitField(BigInt(interaction.app_permissions));
+		if ('channel' in interaction) {
 			this.channel = channelFrom(interaction.channel, client);
 		}
-		this.user = this.member?.user ?? new User(client, interaction.user!);
+		this.user = this.member?.user ?? Transformers.User(client, interaction.user!);
+
+		this.entitlements = interaction.entitlements.map(e => Transformers.Entitlement(this.client, e));
 	}
 
 	static transformBodyRequest(
 		body: ReplyInteractionBody,
-		files: RawFile[] | undefined,
+		files: ResolverProps['files'],
 		self: UsingClient,
 	): APIInteractionResponse {
 		switch (body.type) {
@@ -127,26 +155,11 @@ export class BaseInteraction<
 				return body;
 			case InteractionResponseType.ChannelMessageWithSource:
 			case InteractionResponseType.UpdateMessage: {
-				const poll = (body as InteractionCreateBodyRequest).poll;
+				//@ts-expect-error
 				return {
 					type: body.type,
-					//@ts-ignore
-					data: {
-						//@ts-ignore
-						allowed_mentions: self.options?.allowedMentions,
-						...(body.data ?? {}),
-						//@ts-ignore
-						components: body.data?.components?.map(x => (x instanceof ActionRow ? x.toJSON() : x)),
-						embeds: body.data?.embeds?.map(x => (x instanceof Embed ? x.toJSON() : x)),
-						attachments:
-							body.data && 'attachments' in body.data
-								? body.data.attachments?.map((x, i) => ({ id: i, ...resolveAttachment(x) }))
-								: (files?.map((x, id) => ({
-										id,
-										filename: x.name,
-									})) as RESTAPIAttachment[]),
-						poll: poll ? (poll instanceof PollBuilder ? poll.toJSON() : poll) : undefined,
-					},
+					// @ts-expect-error
+					data: BaseInteraction.transformBody(body.data ?? {}, files, self),
 				};
 			}
 			case InteractionResponseType.Modal:
@@ -158,14 +171,12 @@ export class BaseInteraction<
 							: {
 									...body.data,
 									components: body.data?.components
-										? body.data.components.map(x =>
-												x instanceof ActionRow
-													? (x.toJSON() as unknown as APIActionRowComponent<APITextInputComponent>)
-													: x,
-											)
+										? body.data.components.map(x => (x instanceof Label ? x.toJSON() : x))
 										: [],
 								},
 				};
+			case InteractionResponseType.LaunchActivity:
+				return body;
 			default:
 				return body;
 		}
@@ -173,71 +184,180 @@ export class BaseInteraction<
 
 	static transformBody<T>(
 		body:
+			| InteractionCreateBodyRequest
 			| InteractionMessageUpdateBodyRequest
 			| MessageUpdateBodyRequest
 			| MessageCreateBodyRequest
 			| MessageWebhookCreateBodyRequest,
-		files: RawFile[] | undefined,
+		files: ResolverProps['files'],
 		self: UsingClient,
 	) {
 		const poll = (body as MessageWebhookCreateBodyRequest).poll;
 
-		return {
+		const payload = {
 			allowed_mentions: self.options?.allowedMentions,
-			attachments:
-				'attachments' in body
-					? body.attachments?.map((x, i) => ({ id: i, ...resolveAttachment(x) }))
-					: (files?.map((x, id) => ({
-							id,
-							filename: x.name,
-						})) as RESTAPIAttachment[]),
 			...body,
 			components: body.components?.map(x => (x instanceof ActionRow ? x.toJSON() : x)),
-			embeds: body?.embeds?.map(x => (x instanceof Embed ? x.toJSON() : x)),
+			embeds: body?.embeds?.map(x => ('toJSON' in x ? x.toJSON() : x)),
 			poll: poll ? (poll instanceof PollBuilder ? poll.toJSON() : poll) : undefined,
-		} as T;
+		};
+
+		if (Array.isArray(body.attachments)) {
+			payload.attachments = body.attachments.map((x, i) => {
+				if (x instanceof Attachment) {
+					return {
+						id: x.id ?? i.toString(),
+						title: x.title,
+						description: x.description,
+						filename: x.filename,
+						is_spoiler: x.spoiler,
+					};
+				}
+				return {
+					id: x.id ?? i.toString(),
+					...resolveAttachment(x),
+				};
+			});
+		} else if (files?.length) {
+			payload.attachments = files.map((file, i) => {
+				if (file instanceof AttachmentBuilder) return { id: i.toString(), ...resolveAttachment(file) };
+				if (file instanceof Attachment) {
+					return {
+						id: i.toString(),
+						title: file.title,
+						description: file.description,
+						filename: file.filename,
+						is_spoiler: file.spoiler,
+					};
+				}
+				return { id: i.toString(), filename: file.filename };
+			});
+		}
+		return payload as T;
 	}
 
-	private async matchReplied(body: ReplyInteractionBody) {
+	private async matchReplied(body: ReplyInteractionBody, withResponse = false) {
 		if (this.__reply) {
 			//@ts-expect-error
 			const { files, ...rest } = body.data ?? {};
 			//@ts-expect-error
 			const data = body.data instanceof Modal ? body.data : rest;
 			const parsedFiles = files ? await resolveFiles(files) : undefined;
-			return (this.replied = this.__reply({
-				body: BaseInteraction.transformBodyRequest({ data, type: body.type }, parsedFiles, this.client),
+			const repliedPromise = this.__reply({
+				body: BaseInteraction.transformBodyRequest({ data, type: body.type }, files, this.client),
 				files: parsedFiles,
-			}).then(() => (this.replied = true)));
+			}).then(() => {
+				this.replied = true;
+				this._repliedPromise = undefined;
+			});
+			this._repliedPromise = repliedPromise;
+			await repliedPromise;
+			return;
 		}
-		return (this.replied = this.client.interactions.reply(this.id, this.token, body).then(() => (this.replied = true)));
-	}
-
-	async reply(body: ReplyInteractionBody) {
-		if (this.replied) {
-			throw new Error('Interaction already replied');
-		}
-		await this.matchReplied(body);
-		// @ts-expect-error
-		if (body.data instanceof Modal && body.data.__exec)
-			// @ts-expect-error
-			this.client.components.modals.set(this.user.id, (body.data as Modal).__exec);
-	}
-
-	deferReply(flags?: MessageFlags) {
-		return this.reply({
-			type: InteractionResponseType.DeferredChannelMessageWithSource,
-			data: {
-				flags,
-			},
+		const repliedPromise = this.client.interactions.reply(this.id, this.token, body, withResponse).then(result => {
+			this.replied = true;
+			this._repliedPromise = undefined;
+			return result;
 		});
+		this._repliedPromise = repliedPromise;
+		const result = await repliedPromise;
+		return result?.resource?.message
+			? Transformers.WebhookMessage(this.client, result.resource.message as any, this.id, this.token)
+			: undefined;
+	}
+
+	protected async hasRepliedOrAwaitPendingReply() {
+		const repliedPromise = this._repliedPromise;
+		if (!this.replied && !repliedPromise) return false;
+		if (repliedPromise) await repliedPromise;
+		return true;
+	}
+
+	async reply<WR extends boolean = false>(
+		body: ReplyInteractionBody,
+		withResponse?: WR,
+	): Promise<When<WR, WebhookMessageStructure, undefined>> {
+		if (this.replied || this._repliedPromise) {
+			throw new SeyfertError('INTERACTION_ALREADY_REPLIED', { metadata: { detail: 'Interaction already replied' } });
+		}
+		const result = await this.matchReplied(body, withResponse);
+		// @ts-expect-error
+		if (body.data instanceof Modal) {
+			// @ts-expect-error
+			if (body.data.__exec) this.client.components.modals.set(this.user.id, (body.data as Modal).__exec);
+			else if (this.client.components.modals.has(this.user.id)) this.client.components.modals.delete(this.user.id);
+		}
+		return result as never;
+	}
+
+	deferReply<WR extends boolean = false>(
+		flags?: MessageFlags,
+		withResponse?: WR,
+	): Promise<When<WR, WebhookMessageStructure, undefined>> {
+		this.deferred = true;
+		return this.reply(
+			{
+				type: InteractionResponseType.DeferredChannelMessageWithSource,
+				data: {
+					flags,
+				},
+			},
+			withResponse,
+		) as never;
+	}
+
+	isButton(): this is ButtonInteraction {
+		return false;
+	}
+
+	isChannelSelectMenu(): this is ChannelSelectMenuInteraction {
+		return false;
+	}
+
+	isRoleSelectMenu(): this is RoleSelectMenuInteraction {
+		return false;
+	}
+
+	isMentionableSelectMenu(): this is MentionableSelectMenuInteraction {
+		return false;
+	}
+
+	isUserSelectMenu(): this is UserSelectMenuInteraction {
+		return false;
+	}
+
+	isStringSelectMenu(): this is StringSelectMenuInteraction {
+		return false;
+	}
+
+	isChatInput(): this is ChatInputCommandInteraction {
+		return false;
+	}
+
+	isUser(): this is UserCommandInteraction {
+		return false;
+	}
+
+	isMessage(): this is MessageCommandInteraction {
+		return false;
+	}
+
+	isAutocomplete(): this is AutocompleteInteraction {
+		return false;
+	}
+
+	isModal(): this is ModalSubmitInteraction {
+		return false;
+	}
+
+	isEntryPoint(): this is EntryPointInteraction {
+		return false;
 	}
 
 	static from(client: UsingClient, gateway: GatewayInteractionCreateDispatchData, __reply?: __InternalReplyFunction) {
 		switch (gateway.type) {
 			case InteractionType.ApplicationCommandAutocomplete:
 				return new AutocompleteInteraction(client, gateway, undefined, __reply);
-			// biome-ignore lint/suspicious/noFallthroughSwitchClause: bad interaction  between biome and ts-server
 			case InteractionType.ApplicationCommand:
 				switch (gateway.data.type) {
 					case ApplicationCommandType.ChatInput:
@@ -250,8 +370,11 @@ export class BaseInteraction<
 						return new UserCommandInteraction(client, gateway as APIUserApplicationCommandInteraction, __reply);
 					case ApplicationCommandType.Message:
 						return new MessageCommandInteraction(client, gateway as APIMessageApplicationCommandInteraction, __reply);
+					case ApplicationCommandType.PrimaryEntryPoint:
+						return new EntryPointInteraction(client, gateway as APIEntryPointCommandInteraction, __reply);
+					default:
+						return new BaseInteraction(client, gateway, __reply);
 				}
-			// biome-ignore lint/suspicious/noFallthroughSwitchClause: bad interaction  between biome and ts-server
 			case InteractionType.MessageComponent:
 				switch (gateway.data.component_type) {
 					case ComponentType.Button:
@@ -278,6 +401,8 @@ export class BaseInteraction<
 							gateway as APIMessageComponentSelectMenuInteraction,
 							__reply,
 						);
+					default:
+						return new BaseInteraction(client, gateway, __reply);
 				}
 			case InteractionType.ModalSubmit:
 				return new ModalSubmitInteraction(client, gateway);
@@ -286,8 +411,20 @@ export class BaseInteraction<
 		}
 	}
 
-	fetchGuild(force = false) {
-		return this.guildId ? this.client.guilds.fetch(this.guildId, force) : undefined;
+	fetchGuild(mode?: 'rest' | 'flow'): Promise<GuildStructure<'cached' | 'api'> | undefined>;
+	fetchGuild(mode: 'cache'): ReturnCache<GuildStructure<'cached'> | undefined>;
+	fetchGuild(mode: 'cache' | 'rest' | 'flow' = 'flow') {
+		if (!this.guildId)
+			return mode === 'cache' ? (this.client.cache.adapter.isAsync ? Promise.resolve() : undefined) : Promise.resolve();
+		switch (mode) {
+			case 'cache':
+				return (
+					this.client.cache.guilds?.get(this.guildId) ||
+					(this.client.cache.adapter.isAsync ? (Promise.resolve() as any) : undefined)
+				);
+			default:
+				return this.client.guilds.fetch(this.guildId, mode === 'rest');
+		}
 	}
 }
 
@@ -299,33 +436,38 @@ export type AllInteractions =
 	| ComponentInteraction
 	| SelectMenuInteraction
 	| ModalSubmitInteraction
+	| EntryPointInteraction
 	| BaseInteraction;
 
-export interface AutocompleteInteraction
-	extends ObjectToLower<
+export interface AutocompleteInteraction<
+	FromGuild extends boolean = boolean,
+	ValueType extends string | number = string | number,
+> extends ObjectToLower<
 		Omit<
 			APIApplicationCommandAutocompleteInteraction,
 			'user' | 'member' | 'type' | 'data' | 'message' | 'channel' | 'app_permissions'
 		>
 	> {}
 
-export class AutocompleteInteraction<FromGuild extends boolean = boolean> extends BaseInteraction<
-	FromGuild,
-	APIApplicationCommandAutocompleteInteraction
-> {
+export class AutocompleteInteraction<
+	FromGuild extends boolean = boolean,
+	ValueType extends string | number = string | number,
+> extends BaseInteraction<FromGuild, APIApplicationCommandAutocompleteInteraction> {
 	declare type: InteractionType.ApplicationCommandAutocomplete;
 	declare data: ObjectToLower<APIApplicationCommandAutocompleteInteraction['data']>;
-	options: OptionResolver;
+	options: OptionResolverStructure;
+	declare entitlements: EntitlementStructure[];
+	declare channel: AllChannels;
 	constructor(
 		client: UsingClient,
 		interaction: APIApplicationCommandAutocompleteInteraction,
-		resolver?: OptionResolver,
+		resolver?: OptionResolverStructure,
 		protected __reply?: __InternalReplyFunction,
 	) {
 		super(client, interaction);
 		this.options =
 			resolver ??
-			new OptionResolver(
+			Transformers.OptionResolver(
 				client,
 				interaction.data.options,
 				undefined,
@@ -338,13 +480,19 @@ export class AutocompleteInteraction<FromGuild extends boolean = boolean> extend
 		return this.options.getAutocompleteValue() ?? '';
 	}
 
-	respond(choices: APICommandAutocompleteInteractionResponseCallbackData['choices']) {
+	respond(choices: APICommandAutocompleteInteractionResponseCallbackData<ValueType>['choices']) {
 		return super.reply({ data: { choices }, type: InteractionResponseType.ApplicationCommandAutocompleteResult });
 	}
 
+	isAutocomplete(): this is AutocompleteInteraction<FromGuild, ValueType> {
+		return true;
+	}
+
 	/** @intenal */
-	async reply(..._args: unknown[]) {
-		throw new Error('Cannot use reply in this interaction');
+	async reply(..._args: unknown[]): Promise<any> {
+		throw new SeyfertError('CANNOT_USE_REPLY', {
+			metadata: { detail: 'Cannot use reply in this interaction' },
+		});
 	}
 }
 
@@ -352,50 +500,81 @@ export class Interaction<
 	FromGuild extends boolean = boolean,
 	Type extends APIInteraction = APIInteraction,
 > extends BaseInteraction<FromGuild, Type> {
-	fetchMessage(messageId: string) {
+	declare channel: AllChannels;
+	fetchMessage(messageId: string): Promise<WebhookMessageStructure> {
 		return this.client.interactions.fetchResponse(this.token, messageId);
 	}
 
-	fetchResponse() {
+	fetchResponse(): Promise<WebhookMessageStructure> {
 		return this.fetchMessage('@original');
 	}
 
-	async write<FR extends boolean = false>(
+	write<FR extends boolean = false>(
 		body: InteractionCreateBodyRequest,
-		fetchReply?: FR,
-	): Promise<When<FR, WebhookMessage, void>> {
-		(await this.reply({
-			type: InteractionResponseType.ChannelMessageWithSource,
-			data: body,
-		})) as never;
-		if (fetchReply) return this.fetchResponse() as never;
-		return undefined as never;
+		withResponse?: FR,
+	): Promise<When<FR, WebhookMessageStructure, void>> {
+		return this.reply(
+			{
+				type: InteractionResponseType.ChannelMessageWithSource,
+				data: body,
+			},
+			withResponse,
+		) as never;
 	}
 
-	modal(body: ModalCreateBodyRequest) {
-		return this.reply({
+	modal(body: ModalCreateBodyRequest, options?: undefined): Promise<undefined>;
+	modal(body: ModalCreateBodyRequest, options: ModalCreateOptions): Promise<ModalSubmitInteraction | null>;
+	async modal(body: ModalCreateBodyRequest, options?: ModalCreateOptions | undefined) {
+		if (options !== undefined && !(body instanceof Modal)) {
+			body = new Modal(body);
+		}
+
+		if (options === undefined)
+			return this.reply({
+				type: InteractionResponseType.Modal,
+				data: body,
+			});
+
+		const promise = new Promise<ModalSubmitInteraction | null>(res => {
+			let nodeTimeout: NodeJS.Timeout | undefined;
+			// body is always a modal here, so we can safely cast it
+			(body as Modal).__exec = (interaction: ModalSubmitInteraction) => {
+				res(interaction);
+				clearTimeout(nodeTimeout);
+			};
+			if (options?.waitFor && options?.waitFor > 0) {
+				nodeTimeout = setTimeout(() => {
+					res(null);
+				}, options.waitFor);
+			}
+		});
+		await this.reply({
 			type: InteractionResponseType.Modal,
 			data: body,
 		});
+		return promise;
 	}
 
 	async editOrReply<FR extends boolean = false>(
 		body: InteractionCreateBodyRequest,
 		fetchReply?: FR,
-	): Promise<When<FR, WebhookMessage, void>>;
-	async editOrReply<FR extends true = true>(body: InteractionMessageUpdateBodyRequest, fetchReply?: FR) {
-		if (await this.replied) {
-			const { content, embeds, allowed_mentions, components, files, attachments } = body;
-			return this.editResponse({ content, embeds, allowed_mentions, components, files, attachments });
+	): Promise<When<FR, WebhookMessageStructure, void>>;
+	async editOrReply<FR extends true = true>(
+		body: InteractionMessageUpdateBodyRequest,
+		fetchReply?: FR,
+	): Promise<WebhookMessageStructure> {
+		if (await this.hasRepliedOrAwaitPendingReply()) {
+			const { content, embeds, allowed_mentions, components, files, attachments, poll, flags } = body;
+			return this.editResponse({ content, embeds, allowed_mentions, components, files, attachments, poll, flags });
 		}
 		return this.write(body as InteractionCreateBodyRequest, fetchReply);
 	}
 
-	editMessage(messageId: string, body: InteractionMessageUpdateBodyRequest) {
+	editMessage(messageId: string, body: InteractionMessageUpdateBodyRequest): Promise<WebhookMessageStructure> {
 		return this.client.interactions.editMessage(this.token, messageId, body);
 	}
 
-	editResponse(body: InteractionMessageUpdateBodyRequest) {
+	editResponse(body: InteractionMessageUpdateBodyRequest): Promise<WebhookMessageStructure> {
 		return this.editMessage('@original', body);
 	}
 
@@ -404,10 +583,10 @@ export class Interaction<
 	}
 
 	deleteMessage(messageId: string) {
-		return this.client.interactions.deleteResponse(this.id, this.token, messageId);
+		return this.client.interactions.deleteResponse(this.token, messageId);
 	}
 
-	async followup(body: MessageWebhookCreateBodyRequest) {
+	followup(body: MessageWebhookCreateBodyRequest): Promise<WebhookMessageStructure> {
 		return this.client.interactions.followup(this.token, body);
 	}
 }
@@ -416,7 +595,8 @@ export class ApplicationCommandInteraction<
 	FromGuild extends boolean = boolean,
 	Type extends APIApplicationCommandInteraction = APIApplicationCommandInteraction,
 > extends Interaction<FromGuild, Type> {
-	type = ApplicationCommandType.ChatInput;
+	type!: ApplicationCommandType;
+	declare channel: AllChannels;
 	respond(
 		data:
 			| APIInteractionResponseChannelMessageWithSource
@@ -426,6 +606,66 @@ export class ApplicationCommandInteraction<
 	) {
 		return this.reply(data);
 	}
+}
+
+/**
+ * Seyfert don't support activities, so this interaction is blank
+ */
+export class EntryPointInteraction<FromGuild extends boolean = boolean> extends ApplicationCommandInteraction<
+	FromGuild,
+	APIEntryPointCommandInteraction
+> {
+	declare channel: AllChannels;
+	async withResponse(data?: InteractionCreateBodyRequest) {
+		let body = { type: InteractionResponseType.LaunchActivity } as const;
+
+		if (data) {
+			let { files, ...rest } = data;
+			files = files ? await resolveFiles(files) : undefined;
+			body = BaseInteraction.transformBody(rest, files, this.client);
+		}
+		const response = await this.client.proxy
+			.interactions(this.id)(this.token)
+			.callback.post({
+				auth: false,
+				body,
+				query: { with_response: true },
+			});
+
+		const result: Partial<EntryPointWithResponseResult> = {
+			interaction: toCamelCase(response.interaction),
+		};
+
+		if (response.resource) {
+			if (response.resource.type !== InteractionResponseType.LaunchActivity) {
+				result.resource = {
+					type: response.resource.type,
+					message: Transformers.WebhookMessage(this.client, response.resource.message as any, this.id, this.token),
+				};
+			} else {
+				result.resource = {
+					type: response.resource.type,
+					activityInstance: response.resource.activity_instance!,
+				};
+			}
+		}
+
+		return result as EntryPointWithResponseResult;
+	}
+
+	isEntryPoint(): this is EntryPointInteraction {
+		return true;
+	}
+}
+
+export interface EntryPointWithResponseResult {
+	interaction: ObjectToLower<InteractionCallbackData>;
+	resource?:
+		| { type: InteractionResponseType.LaunchActivity; activityInstance: InteractionCallbackResourceActivity }
+		| {
+				type: Exclude<InteractionResponseType, InteractionResponseType.LaunchActivity>;
+				message: WebhookMessageStructure;
+		  };
 }
 
 export interface ComponentInteraction
@@ -441,10 +681,10 @@ export class ComponentInteraction<
 	Type extends APIMessageComponentInteraction = APIMessageComponentInteraction,
 > extends Interaction<FromGuild, Type> {
 	declare data: ObjectToLower<APIMessageComponentInteraction['data']>;
-	declare channelId: string;
 	declare channel: AllChannels;
 	declare type: InteractionType.MessageComponent;
-	declare message: Message;
+	declare message: MessageStructure;
+	declare entitlements: EntitlementStructure[];
 
 	update(data: ComponentInteractionMessageUpdate) {
 		return this.reply({
@@ -466,39 +706,19 @@ export class ComponentInteraction<
 	get componentType() {
 		return this.data.componentType;
 	}
-
-	isButton(): this is ButtonInteraction {
-		return this.data.componentType === ComponentType.Button;
-	}
-
-	isChannelSelectMenu(): this is ChannelSelectMenuInteraction {
-		return this.componentType === ComponentType.ChannelSelect;
-	}
-
-	isRoleSelectMenu(): this is RoleSelectMenuInteraction {
-		return this.componentType === ComponentType.RoleSelect;
-	}
-
-	isMentionableSelectMenu(): this is MentionableSelectMenuInteraction {
-		return this.componentType === ComponentType.MentionableSelect;
-	}
-
-	isUserSelectMenu(): this is UserSelectMenuInteraction {
-		return this.componentType === ComponentType.UserSelect;
-	}
-
-	isStringSelectMenu(): this is StringSelectMenuInteraction {
-		return this.componentType === ComponentType.StringSelect;
-	}
 }
 
 export class ButtonInteraction extends ComponentInteraction {
 	declare data: ObjectToLower<APIMessageButtonInteractionData>;
+
+	isButton(): this is ButtonInteraction {
+		return true;
+	}
 }
 
 export class SelectMenuInteraction extends ComponentInteraction {
 	declare data: ObjectToLower<APIMessageComponentSelectMenuInteraction['data']>;
-
+	declare channel: AllChannels;
 	constructor(
 		client: UsingClient,
 		interaction: APIMessageComponentSelectMenuInteraction,
@@ -515,15 +735,20 @@ export class SelectMenuInteraction extends ComponentInteraction {
 export class StringSelectMenuInteraction<
 	T extends any[] = string[],
 > extends (SelectMenuInteraction as unknown as ToClass<
-	Omit<SelectMenuInteraction, 'data'>,
+	Omit<SelectMenuInteraction, 'data' | 'isStringSelectMenu'>,
 	StringSelectMenuInteraction
 >) {
 	declare data: OmitInsert<ObjectToLower<APIMessageStringSelectInteractionData>, 'values', { values: T }>;
 	declare values: T;
+	declare channel: AllChannels;
+	isStringSelectMenu(): this is StringSelectMenuInteraction {
+		return true;
+	}
 }
 
 export class ChannelSelectMenuInteraction extends SelectMenuInteraction {
-	channels: AllChannels[];
+	channels: ResolvedChannel[];
+	declare channel: AllChannels;
 	constructor(
 		client: UsingClient,
 		interaction: APIMessageComponentSelectMenuInteraction,
@@ -533,12 +758,17 @@ export class ChannelSelectMenuInteraction extends SelectMenuInteraction {
 		const resolved = (interaction.data as APIMessageChannelSelectInteractionData).resolved;
 		this.channels = this.values.map(x => channelFrom(resolved.channels[x], this.client));
 	}
+
+	isChannelSelectMenu(): this is ChannelSelectMenuInteraction {
+		return true;
+	}
 }
 
 export class MentionableSelectMenuInteraction extends SelectMenuInteraction {
-	roles: GuildRole[];
-	members: InteractionGuildMember[];
-	users: User[];
+	roles: GuildRoleStructure[];
+	members: InteractionGuildMemberStructure[];
+	users: UserStructure[];
+	declare channel: AllChannels;
 	constructor(
 		client: UsingClient,
 		interaction: APIMessageComponentSelectMenuInteraction,
@@ -546,26 +776,27 @@ export class MentionableSelectMenuInteraction extends SelectMenuInteraction {
 	) {
 		super(client, interaction);
 		const resolved = (interaction.data as APIMessageMentionableSelectInteractionData).resolved;
-		this.roles = resolved.roles
-			? this.values.map(x => new GuildRole(this.client, resolved.roles![x], this.guildId!))
-			: [];
-		this.members = resolved.members
-			? this.values.map(
-					x =>
-						new InteractionGuildMember(
-							this.client,
-							resolved.members![x],
-							this.users!.find(u => u.id === x)!,
-							this.guildId!,
-						),
-				)
-			: [];
-		this.users = resolved.users ? this.values.map(x => new User(this.client, resolved.users![x])) : [];
+		this.roles = this.values
+			.filter(x => resolved.roles?.[x])
+			.map(x => Transformers.GuildRole(this.client, resolved.roles![x]!, this.guildId!));
+		this.members = this.values
+			.filter(x => resolved.members?.[x])
+			.map(x =>
+				Transformers.InteractionGuildMember(this.client, resolved.members![x]!, resolved.users![x]!, this.guildId!),
+			);
+		this.users = this.values
+			.filter(x => resolved.users?.[x])
+			.map(x => Transformers.User(this.client, resolved.users![x]!));
+	}
+
+	isMentionableSelectMenu(): this is MentionableSelectMenuInteraction {
+		return true;
 	}
 }
 
 export class RoleSelectMenuInteraction extends SelectMenuInteraction {
-	roles: GuildRole[];
+	roles: GuildRoleStructure[];
+	declare channel: AllChannels;
 	constructor(
 		client: UsingClient,
 		interaction: APIMessageComponentSelectMenuInteraction,
@@ -573,13 +804,18 @@ export class RoleSelectMenuInteraction extends SelectMenuInteraction {
 	) {
 		super(client, interaction);
 		const resolved = (interaction.data as APIMessageRoleSelectInteractionData).resolved;
-		this.roles = this.values.map(x => new GuildRole(this.client, resolved.roles[x], this.guildId!));
+		this.roles = this.values.map(x => Transformers.GuildRole(this.client, resolved.roles[x], this.guildId!));
+	}
+
+	isRoleSelectMenu(): this is RoleSelectMenuInteraction {
+		return true;
 	}
 }
 
 export class UserSelectMenuInteraction extends SelectMenuInteraction {
-	members: InteractionGuildMember[];
-	users: User[];
+	members: InteractionGuildMemberStructure[];
+	users: UserStructure[];
+	declare channel: AllChannels;
 	constructor(
 		client: UsingClient,
 		interaction: APIMessageComponentSelectMenuInteraction,
@@ -587,18 +823,16 @@ export class UserSelectMenuInteraction extends SelectMenuInteraction {
 	) {
 		super(client, interaction);
 		const resolved = (interaction.data as APIMessageUserSelectInteractionData).resolved;
-		this.users = this.values.map(x => new User(this.client, resolved.users[x]));
-		this.members = resolved.members
-			? this.values.map(
-					x =>
-						new InteractionGuildMember(
-							this.client,
-							resolved.members![x],
-							this.users!.find(u => u.id === x)!,
-							this.guildId!,
-						),
-				)
-			: [];
+		this.users = this.values.map(x => Transformers.User(this.client, resolved.users[x]));
+		this.members = this.values
+			.filter(x => resolved.members?.[x])
+			.map(x =>
+				Transformers.InteractionGuildMember(this.client, resolved.members![x]!, resolved.users[x]!, this.guildId!),
+			);
+	}
+
+	isUserSelectMenu(): this is UserSelectMenuInteraction {
+		return true;
 	}
 }
 
@@ -607,6 +841,10 @@ export class ChatInputCommandInteraction<FromGuild extends boolean = boolean> ex
 	APIChatInputApplicationCommandInteraction
 > {
 	declare data: ObjectToLower<APIChatInputApplicationCommandInteractionData>;
+	declare channel: AllChannels;
+	isChatInput(): this is ChatInputCommandInteraction {
+		return true;
+	}
 }
 
 export class UserCommandInteraction<FromGuild extends boolean = boolean> extends ApplicationCommandInteraction<
@@ -615,6 +853,10 @@ export class UserCommandInteraction<FromGuild extends boolean = boolean> extends
 > {
 	declare type: ApplicationCommandType.User;
 	declare data: ObjectToLower<APIUserApplicationCommandInteractionData>;
+	declare channel: AllChannels;
+	isUser(): this is UserCommandInteraction {
+		return true;
+	}
 }
 
 export class MessageCommandInteraction<FromGuild extends boolean = boolean> extends ApplicationCommandInteraction<
@@ -623,6 +865,10 @@ export class MessageCommandInteraction<FromGuild extends boolean = boolean> exte
 > {
 	declare type: ApplicationCommandType.Message;
 	declare data: ObjectToLower<APIMessageApplicationCommandInteractionData>;
+	declare channel: AllChannels;
+	isMessage(): this is MessageCommandInteraction {
+		return true;
+	}
 }
 
 export interface ModalSubmitInteraction<FromGuild extends boolean = boolean>
@@ -630,6 +876,26 @@ export interface ModalSubmitInteraction<FromGuild extends boolean = boolean>
 @mix(Interaction)
 export class ModalSubmitInteraction<FromGuild extends boolean = boolean> extends BaseInteraction<FromGuild> {
 	declare data: ObjectToLower<APIModalSubmission>;
+	declare channel: AllChannels;
+	update<WR extends boolean = false>(
+		data: ComponentInteractionMessageUpdate,
+		withResponse?: WR,
+	): Promise<When<WR, WebhookMessageStructure, undefined>> {
+		return this.reply<WR>(
+			{
+				type: InteractionResponseType.UpdateMessage,
+				data,
+			},
+			withResponse,
+		);
+	}
+
+	deferUpdate(): Promise<undefined> {
+		return this.reply({
+			type: InteractionResponseType.DeferredMessageUpdate,
+		});
+	}
+
 	get customId() {
 		return this.data.customId;
 	}
@@ -638,18 +904,170 @@ export class ModalSubmitInteraction<FromGuild extends boolean = boolean> extends
 		return this.data.components;
 	}
 
-	getInputValue(customId: string, required: true): string;
-	getInputValue(customId: string, required?: false): string | undefined;
-	getInputValue(customId: string, required?: boolean): string | undefined {
-		let value;
-		for (const { components } of this.components) {
-			const get = components.find(x => x.customId === customId);
-			if (get) {
-				value = get.value;
-				break;
-			}
+	getComponent(customId: string, type?: ComponentType[]): ObjectToLower<ModalSubmitInsideLabelData> | undefined {
+		return this.components
+			.filter(c => c.type === ComponentType.Label && c.component && (!type?.length || type.includes(c.component.type)))
+			.find(c => c.component!.customId === customId)?.component;
+	}
+
+	getChannels(customId: string, required: true): ResolvedChannel[];
+	getChannels(customId: string, required?: false): ResolvedChannel[] | void;
+	getChannels(customId: string, required?: boolean): ResolvedChannel[] | void {
+		const component = this.getComponent(customId, [ComponentType.ChannelSelect]);
+		if (!component && required)
+			throw new SeyfertError('INTERNAL_ERROR', {
+				metadata: { detail: `${customId} component not found or is not a channel select menu` },
+			});
+		if (component && 'values' in component) {
+			const resolved = this.data.resolved?.channels;
+			return component.values.filter(x => resolved?.[x]).map(x => channelFrom(resolved![x], this.client));
 		}
-		if (!value && required) throw new Error(`${customId} component doesn't have a value`);
+	}
+
+	getRoles(customId: string, required: true): GuildRoleStructure[];
+	getRoles(customId: string, required?: false): GuildRoleStructure[] | void;
+	getRoles(customId: string, required?: boolean): GuildRoleStructure[] | void {
+		const component = this.getComponent(customId, [ComponentType.RoleSelect]);
+		if (!component && required)
+			throw new SeyfertError('INTERNAL_ERROR', {
+				metadata: { detail: `${customId} component not found or is not a role select menu` },
+			});
+		if (component && 'values' in component) {
+			const resolved = this.data.resolved?.roles;
+			return component.values
+				.filter(x => resolved?.[x])
+				.map(x => Transformers.GuildRole(this.client, resolved![x], this.guildId!));
+		}
+	}
+
+	getUsers(customId: string, required: true): UserStructure[];
+	getUsers(customId: string, required?: false): UserStructure[] | void;
+	getUsers(customId: string, required?: boolean): UserStructure[] | void {
+		const component = this.getComponent(customId, [ComponentType.UserSelect]);
+		if (!component && required)
+			throw new SeyfertError('INTERNAL_ERROR', {
+				metadata: { detail: `${customId} component not found or is not a user select menu` },
+			});
+		if (component && 'values' in component) {
+			const resolved = this.data.resolved?.users;
+			return component.values.filter(x => resolved?.[x]).map(x => Transformers.User(this.client, resolved![x]));
+		}
+	}
+
+	getMentionables(
+		customId: string,
+		required: true,
+	): (UserStructure | GuildRoleStructure | InteractionGuildMemberStructure)[];
+	getMentionables(
+		customId: string,
+		required?: false,
+	): (UserStructure | GuildRoleStructure | InteractionGuildMemberStructure)[] | void;
+	getMentionables(
+		customId: string,
+		required?: boolean,
+	): (UserStructure | GuildRoleStructure | InteractionGuildMemberStructure)[] | void {
+		const component = this.getComponent(customId, [ComponentType.MentionableSelect]);
+		if (!component && required)
+			throw new SeyfertError('INTERNAL_ERROR', {
+				metadata: { detail: `${customId} component not found or is not a mentionable select menu` },
+			});
+		if (component && 'values' in component) {
+			const resolved = this.data.resolved;
+			return component.values.map(x => {
+				if (resolved?.users?.[x]) return Transformers.User(this.client, resolved!.users[x]);
+				if (resolved?.roles?.[x]) return Transformers.GuildRole(this.client, resolved!.roles[x], this.guildId!);
+				if (resolved?.members?.[x])
+					return Transformers.InteractionGuildMember(
+						this.client,
+						resolved!.members[x],
+						resolved!.users![x]!,
+						this.guildId!,
+					);
+				throw new SeyfertError('INTERNAL_ERROR', {
+					metadata: { detail: `Mentionable ${x} not found in resolved data` },
+				});
+			});
+		}
+	}
+
+	getRadioValues(customId: string, required: true): string;
+	getRadioValues(customId: string, required?: false): string | void;
+	getRadioValues(customId: string, required?: boolean): string | void {
+		const component = this.getComponent(customId, [ComponentType.RadioGroup]);
+		if (!component && required)
+			throw new SeyfertError('INTERNAL_ERROR', {
+				metadata: { detail: `${customId} component not found or is not a radio group` },
+			});
+		if (component && 'value' in component) {
+			return component.value as string;
+		}
+	}
+
+	/**
+	 * For checkbox groups.
+	 */
+	getCheckboxValues(customId: string, required: true): string[];
+	getCheckboxValues(customId: string, required?: false): string[] | void;
+	getCheckboxValues(customId: string, required?: boolean): string[] | void {
+		const component = this.getComponent(customId, [ComponentType.CheckboxGroup]);
+		if (!component && required)
+			throw new SeyfertError('INTERNAL_ERROR', {
+				metadata: { detail: `${customId} component not found or is not a checkbox group` },
+			});
+		if (component && 'values' in component) {
+			return component.values as string[];
+		}
+	}
+
+	getCheckbox(customId: string, required: true): boolean;
+	getCheckbox(customId: string, required?: false): boolean | void;
+	getCheckbox(customId: string, required?: boolean): boolean | void {
+		const component = this.getComponent(customId, [ComponentType.Checkbox]);
+		if (!component && required)
+			throw new SeyfertError('INTERNAL_ERROR', {
+				metadata: { detail: `${customId} component not found or is not a checkbox` },
+			});
+		if (component && 'value' in component) {
+			return !!component.value;
+		}
+	}
+
+	getInputValue(customId: string, required: true): string | string[];
+	getInputValue(customId: string, required?: false): string | string[] | undefined;
+	getInputValue(customId: string, required?: boolean): string | string[] | undefined {
+		let value: string | string[] | undefined;
+		const get = this.getComponent(customId);
+		if (get) {
+			if ('value' in get) value = get.value as string;
+			if ('values' in get) value = get.values;
+		}
+
+		if ((!value || value.length === 0) && required)
+			throw new SeyfertError('INTERNAL_ERROR', { metadata: { detail: `${customId} component doesn't have a value` } });
 		return value;
+	}
+
+	getFiles(customId: string, required: true): Attachment[];
+	getFiles(customId: string, required?: false): Attachment[] | undefined;
+	getFiles(customId: string, required?: boolean): Attachment[] | undefined {
+		const component = this.getComponent(customId, [ComponentType.FileUpload]);
+		if (component && 'values' in component) {
+			const attachments = this.data.resolved?.attachments;
+			if (attachments) {
+				return component.values
+					.map(x => attachments[x])
+					.filter((x): x is (typeof attachments)[string] => !!x)
+					.map(x => new Attachment(this.client, { ...x, proxy_url: x.url }));
+			}
+			if (required)
+				throw new SeyfertError('INTERNAL_ERROR', {
+					metadata: { detail: `${customId} component doesn't have any files` },
+				});
+		}
+		return undefined;
+	}
+
+	isModal(): this is ModalSubmitInteraction {
+		return true;
 	}
 }

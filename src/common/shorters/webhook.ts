@@ -1,25 +1,28 @@
+import { resolveFiles } from '../../builders';
+import { Transformers, type WebhookMessageStructure, type WebhookStructure } from '../../client/transformers';
+import {
+	MessagesMethods,
+	type MessageWebhookMethodEditParams,
+	type MessageWebhookMethodWriteParams,
+	type MessageWebhookMethodWriteWaitParams,
+} from '../../structures';
 import type {
+	APIWebhook,
 	RESTPatchAPIWebhookJSONBody,
 	RESTPatchAPIWebhookWithTokenJSONBody,
 	RESTPostAPIChannelWebhookJSONBody,
 	RESTPostAPIWebhookWithTokenJSONBody,
-} from 'discord-api-types/v10';
-import { resolveFiles } from '../../builders';
-import {
-	MessagesMethods,
-	Webhook,
-	WebhookMessage,
-	type MessageWebhookMethodEditParams,
-	type MessageWebhookMethodWriteParams,
-} from '../../structures';
+	RESTPostAPIWebhookWithTokenQuery,
+} from '../../types';
+import type { MakeRequired, OmitInsert } from '../types/util';
 import { BaseShorter } from './base';
 
 export class WebhookShorter extends BaseShorter {
-	async create(channelId: string, body: RESTPostAPIChannelWebhookJSONBody) {
+	async create(channelId: string, body: RESTPostAPIChannelWebhookJSONBody): Promise<WebhookStructure> {
 		const webhook = await this.client.proxy.channels(channelId).webhooks.post({
 			body,
 		});
-		return new Webhook(this.client, webhook);
+		return Transformers.Webhook(this.client, webhook);
 	}
 	/**
 	 * Deletes a webhook.
@@ -45,17 +48,17 @@ export class WebhookShorter extends BaseShorter {
 		webhookId: string,
 		body: RESTPatchAPIWebhookWithTokenJSONBody | RESTPatchAPIWebhookJSONBody,
 		options: WebhookShorterOptionalParams,
-	) {
+	): Promise<WebhookStructure> {
 		if (options.token) {
 			return this.client.proxy
 				.webhooks(webhookId)(options.token)
 				.patch({ body, reason: options.reason, auth: false })
-				.then(webhook => new Webhook(this.client, webhook));
+				.then(webhook => Transformers.Webhook(this.client, webhook));
 		}
 		return this.client.proxy
 			.webhooks(webhookId)
 			.patch({ body, reason: options.reason })
-			.then(webhook => new Webhook(this.client, webhook));
+			.then(webhook => Transformers.Webhook(this.client, webhook));
 	}
 
 	/**
@@ -64,14 +67,14 @@ export class WebhookShorter extends BaseShorter {
 	 * @param token The token of the webhook (optional).
 	 * @returns A Promise that resolves to the fetched webhook.
 	 */
-	async fetch(webhookId: string, token?: string) {
-		let webhook;
+	async fetch(webhookId: string, token?: string): Promise<WebhookStructure> {
+		let webhook: APIWebhook;
 		if (token) {
 			webhook = await this.client.proxy.webhooks(webhookId)(token).get({ auth: false });
 		} else {
 			webhook = await this.client.proxy.webhooks(webhookId).get();
 		}
-		return new Webhook(this.client, webhook);
+		return Transformers.Webhook(this.client, webhook);
 	}
 
 	/**
@@ -81,18 +84,32 @@ export class WebhookShorter extends BaseShorter {
 	 * @param data The data for writing the message.
 	 * @returns A Promise that resolves to the written message.
 	 */
-	async writeMessage(webhookId: string, token: string, { body: data, ...payload }: MessageWebhookMethodWriteParams) {
+	writeMessage(
+		webhookId: string,
+		token: string,
+		payload: MessageWebhookMethodWriteWaitParams,
+	): Promise<WebhookMessageStructure>;
+	writeMessage(
+		webhookId: string,
+		token: string,
+		payload: MessageWebhookMethodWriteParams,
+	): Promise<WebhookMessageStructure | null>;
+	async writeMessage(
+		webhookId: string,
+		token: string,
+		{ body: data, ...payload }: MessageWebhookMethodWriteParams,
+	): Promise<WebhookMessageStructure | null> {
 		const { files, ...body } = data;
-		const parsedFiles = files ? await resolveFiles(files) : [];
+		const parsedFiles = files ? await resolveFiles(files) : undefined;
 		const transformedBody = MessagesMethods.transformMessageBody<RESTPostAPIWebhookWithTokenJSONBody>(
 			body,
-			parsedFiles,
+			files,
 			this.client,
 		);
 		return this.client.proxy
 			.webhooks(webhookId)(token)
-			.post({ ...payload, files: parsedFiles, body: transformedBody })
-			.then(m => (m?.id ? new WebhookMessage(this.client, m, webhookId, token) : null));
+			.post({ ...payload, auth: false, files: parsedFiles, body: transformedBody })
+			.then(m => (m?.id ? Transformers.WebhookMessage(this.client, m, webhookId, token) : null));
 	}
 
 	/**
@@ -107,19 +124,19 @@ export class WebhookShorter extends BaseShorter {
 		webhookId: string,
 		token: string,
 		{ messageId, body: data, ...json }: MessageWebhookMethodEditParams,
-	) {
+	): Promise<WebhookMessageStructure> {
 		const { files, ...body } = data;
-		const parsedFiles = files ? await resolveFiles(files) : [];
+		const parsedFiles = files ? await resolveFiles(files) : undefined;
 		const transformedBody = MessagesMethods.transformMessageBody<RESTPostAPIWebhookWithTokenJSONBody>(
 			body,
-			parsedFiles,
+			files,
 			this.client,
 		);
 		return this.client.proxy
 			.webhooks(webhookId)(token)
 			.messages(messageId)
 			.patch({ ...json, auth: false, files: parsedFiles, body: transformedBody })
-			.then(m => new WebhookMessage(this.client, m, webhookId, token));
+			.then(m => Transformers.WebhookMessage(this.client, m, webhookId, token));
 	}
 
 	/**
@@ -130,8 +147,11 @@ export class WebhookShorter extends BaseShorter {
 	 * @param reason The reason for deleting the message.
 	 * @returns A Promise that resolves when the message is deleted.
 	 */
-	deleteMessage(webhookId: string, token: string, messageId: string, reason?: string) {
-		return this.client.proxy.webhooks(webhookId)(token).messages(messageId).delete({ reason });
+	deleteMessage(payload: WebhookShorterMessageDeleteParams) {
+		return this.client.proxy
+			.webhooks(payload.webhookId)(payload.token)
+			.messages(payload.messageId)
+			.delete({ reason: payload.reason, query: payload.query, auth: false });
 	}
 
 	/**
@@ -140,25 +160,46 @@ export class WebhookShorter extends BaseShorter {
 	 * @param token The token of the webhook.
 	 * @param messageId The ID of the message to fetch.
 	 * @param threadId The ID of the thread the message belongs to.
-	 * @returns A Promise that resolves to the fetched message, or undefined if not found.
+	 * @returns A Promise that resolves to the fetched message
 	 */
-	async fetchMessage(webhookId: string, token: string, messageId: string, threadId?: string) {
+	async fetchMessage(payload: WebhookShorterMessageFetchParams): Promise<WebhookMessageStructure> {
 		const message = await this.client.proxy
-			.webhooks(webhookId)(token)
-			.messages(messageId)
-			.get({ auth: false, query: { threadId } });
-		return message ? new WebhookMessage(this.client, message, webhookId, token) : undefined;
+			.webhooks(payload.webhookId)(payload.token)
+			.messages(payload.messageId)
+			.get({ auth: false, query: payload.query });
+		return Transformers.WebhookMessage(this.client, message, payload.webhookId, payload.token);
 	}
 
-	async listFromGuild(guildId: string) {
+	async listFromGuild(guildId: string): Promise<WebhookStructure[]> {
 		const webhooks = await this.client.proxy.guilds(guildId).webhooks.get();
-		return webhooks.map(webhook => new Webhook(this.client, webhook));
+		return webhooks.map(webhook => Transformers.Webhook(this.client, webhook));
 	}
 
-	async listFromChannel(channelId: string) {
+	async listFromChannel(channelId: string): Promise<WebhookStructure[]> {
 		const webhooks = await this.client.proxy.channels(channelId).webhooks.get();
-		return webhooks.map(webhook => new Webhook(this.client, webhook));
+		return webhooks.map(webhook => Transformers.Webhook(this.client, webhook));
 	}
 }
 
 export type WebhookShorterOptionalParams = Partial<{ token: string; reason: string }>;
+
+export interface WebhookShorterMessageParameters {
+	webhookId: string;
+	token: string;
+	messageId?: string;
+	reason?: string;
+}
+
+export type WebhookShorterMessageParams<
+	Query extends keyof RESTPostAPIWebhookWithTokenQuery = never,
+	R extends keyof WebhookShorterMessageParameters = never,
+> = OmitInsert<
+	WebhookShorterMessageParameters,
+	R,
+	MakeRequired<WebhookShorterMessageParameters, R> &
+		(Query extends never ? {} : { query?: Pick<RESTPostAPIWebhookWithTokenQuery, Query> })
+>;
+
+export type WebhookShorterMessageDeleteParams = WebhookShorterMessageParams<'thread_id', 'messageId'>;
+
+export type WebhookShorterMessageFetchParams = Omit<WebhookShorterMessageParams<'thread_id', 'messageId'>, 'reason'>;

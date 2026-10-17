@@ -1,28 +1,18 @@
-import type { GatewayIntentBits } from 'discord-api-types/v10';
 import type { UsingClient } from '../../../commands';
-import { fakePromise } from '../../../common';
-import type { Cache, ReturnCache } from '../../index';
+import { fakePromise } from '../../../common/it/fake-promise';
+import type { GatewayIntentBits } from '../../../types';
+import type { Cache, CacheFrom, ReturnCache } from '../../index';
 
-export class BaseResource<T = any> {
-	client!: UsingClient;
+export class BaseResource<T = any, S = any> {
 	namespace = 'base';
 
 	constructor(
 		protected cache: Cache,
-		client?: UsingClient,
-	) {
-		if (client) {
-			this.client = client;
-		}
-	}
-
-	/** @internal */
-	__setClient(client: UsingClient) {
-		this.client = client;
-	}
+		readonly client: UsingClient,
+	) {}
 
 	//@ts-expect-error
-	filter(data: any, id: string) {
+	filter(data: any, id: string, from: CacheFrom) {
 		return true;
 	}
 
@@ -37,32 +27,32 @@ export class BaseResource<T = any> {
 		return;
 	}
 
-	setIfNI(intent: keyof typeof GatewayIntentBits, id: string, data: any) {
+	setIfNI(from: CacheFrom, intent: keyof typeof GatewayIntentBits, id: string, data: S) {
 		if (!this.cache.hasIntent(intent)) {
-			return this.set(id, data);
+			return this.set(from, id, data);
 		}
 	}
 
 	get(id: string): ReturnCache<T | undefined> {
-		return this.adapter.get(this.hashId(id));
+		return fakePromise(this.adapter.get(this.hashId(id))).then(data => data ?? undefined) as ReturnCache<T | undefined>;
 	}
 
 	bulk(ids: string[]): ReturnCache<T[]> {
-		return fakePromise(this.adapter.get(ids.map(id => this.hashId(id)))).then(x => x.filter(y => y));
+		return fakePromise(this.adapter.bulkGet(ids.map(id => this.hashId(id)))).then(x => x.filter(y => y));
 	}
 
-	set(id: string, data: any) {
-		if (!this.filter(data, id)) return;
-		return fakePromise(this.addToRelationship(id)).then(() => this.adapter.set(this.hashId(id), data));
+	set(from: CacheFrom, id: string, data: S) {
+		if (!this.filter(data, id, from)) return;
+		return this.adapter.set(this.hashId(id), data, [this.namespace, id]);
 	}
 
-	patch(id: string, data: any) {
-		if (!this.filter(data, id)) return;
-		return fakePromise(this.addToRelationship(id)).then(() => this.adapter.patch(false, this.hashId(id), data));
+	patch(from: CacheFrom, id: string, data: S) {
+		if (!this.filter(data, id, from)) return;
+		return this.adapter.patch(this.hashId(id), data, [this.namespace, id]);
 	}
 
 	remove(id: string) {
-		return fakePromise(this.removeToRelationship(id)).then(() => this.adapter.remove(this.hashId(id)));
+		return this.adapter.remove(this.hashId(id));
 	}
 
 	keys(): ReturnCache<string[]> {
@@ -73,27 +63,23 @@ export class BaseResource<T = any> {
 		return this.adapter.values(this.namespace) as T[];
 	}
 
-	count() {
-		return this.adapter.count(this.namespace);
+	count(): ReturnCache<number> {
+		return this.adapter.count(this.namespace) as number;
 	}
 
-	contains(id: string) {
-		return this.adapter.contains(this.namespace, id);
+	contains(id: string): ReturnCache<boolean> {
+		return this.adapter.contains(this.namespace, id) as boolean;
 	}
 
 	getToRelationship() {
 		return this.adapter.getToRelationship(this.namespace);
 	}
 
-	addToRelationship(id: string | string[]) {
-		return this.adapter.addToRelationship(this.namespace, id);
-	}
-
-	removeToRelationship(id: string | string[]) {
-		return this.adapter.removeToRelationship(this.namespace, id);
+	flush() {
+		return fakePromise(this.adapter.keys(this.namespace)).then(keys => this.adapter.bulkRemove(keys));
 	}
 
 	hashId(id: string) {
-		return `${this.namespace}.${id}`;
+		return id.startsWith(`${this.namespace}.`) ? id : `${this.namespace}.${id}`;
 	}
 }

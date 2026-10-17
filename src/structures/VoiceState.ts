@@ -1,59 +1,124 @@
-import { GuildMember, type UsingClient } from '../';
+import type {
+	AllGuildVoiceChannels,
+	GuildStructure,
+	ReturnCache,
+	UserStructure,
+	UsingClient,
+	VoiceStateStructure,
+} from '../';
 import type { VoiceStateResource } from '../cache/resources/voice-states';
+import { type GuildMemberStructure, Transformers } from '../client/transformers';
 import type { ObjectToLower } from '../common';
-import type { GatewayVoiceState } from '../types';
+import type { APIVoiceState } from '../types';
 import { Base } from './extra/Base';
 
 export interface VoiceState extends Base, ObjectToLower<Omit<VoiceStateResource, 'member'>> {}
 
 export class VoiceState extends Base {
-	protected withMember?: GuildMember;
-	constructor(client: UsingClient, data: GatewayVoiceState) {
+	protected withMember?: GuildMemberStructure;
+	constructor(client: UsingClient, data: APIVoiceState) {
 		super(client);
 		const { member, ...rest } = data;
 		this.__patchThis(rest);
-		if (member?.user && data.guild_id) this.withMember = new GuildMember(client, member, member.user, data.guild_id);
+		if (member?.user && data.guild_id)
+			this.withMember = Transformers.GuildMember(client, member, member.user, data.guild_id);
 	}
 
-	isMuted() {
+	get isMuted() {
 		return this.mute || this.selfMute;
 	}
 
-	async member(force?: boolean) {
-		return (this.withMember ??= await this.client.members.fetch(this.guildId, this.userId, force));
+	get isDeafened() {
+		return this.deaf || this.selfDeaf;
 	}
 
-	async user(force?: boolean) {
+	get isCameraOn() {
+		return this.selfVideo;
+	}
+
+	get isStreaming() {
+		return this.selfStream ?? false;
+	}
+
+	get isSuppressed() {
+		return this.suppress;
+	}
+
+	async member(force?: boolean): Promise<GuildMemberStructure> {
+		return (this.withMember = await this.client.members.fetch(this.guildId, this.userId, force));
+	}
+
+	user(force?: boolean): Promise<UserStructure> {
 		return this.client.users.fetch(this.userId, force);
 	}
 
-	async channel(force?: boolean) {
-		if (!this.channelId) return;
-		return this.client.channels.fetch(this.channelId, force);
+	channel(mode?: 'rest' | 'flow'): Promise<AllGuildVoiceChannels | undefined>;
+	channel(mode: 'cache'): ReturnCache<AllGuildVoiceChannels | undefined>;
+	channel(mode: 'cache' | 'rest' | 'flow' = 'flow') {
+		if (!this.channelId)
+			return mode === 'cache' ? (this.client.cache.adapter.isAsync ? Promise.resolve() : undefined) : Promise.resolve();
+		switch (mode) {
+			case 'cache':
+				return (
+					this.client.cache.channels?.get(this.channelId) ||
+					(this.client.cache.adapter.isAsync ? (Promise.resolve() as any) : undefined)
+				);
+			default:
+				return this.client.channels.fetch(this.channelId, mode === 'rest');
+		}
 	}
 
-	async setMute(mute = !this.mute, reason?: string) {
-		return this.client.members.edit(this.guildId, this.userId, { mute }, reason).then(member => {
-			this.mute = mute;
-			return member;
-		});
+	async setMute(mute = !this.mute, reason?: string): Promise<GuildMemberStructure> {
+		const member = await this.client.members.edit(this.guildId, this.userId, { mute }, reason);
+		this.mute = mute;
+		return member;
 	}
 
-	async setDeaf(deaf = !this.deaf, reason?: string) {
-		return this.client.members.edit(this.guildId, this.userId, { deaf }, reason).then(member => {
-			this.deaf = deaf;
-			return member;
-		});
+	async setDeaf(deaf = !this.deaf, reason?: string): Promise<GuildMemberStructure> {
+		const member = await this.client.members.edit(this.guildId, this.userId, { deaf }, reason);
+		this.deaf = deaf;
+		return member;
 	}
 
-	async disconnect(reason?: string) {
+	async setSuppress(suppress = !this.suppress) {
+		await this.client.voiceStates.setSuppress(this.guildId, suppress);
+		this.suppress = suppress;
+	}
+
+	async requestSpeak(date: string | Date = new Date()) {
+		if (typeof date === 'string') date = new Date(date);
+		if (Number.isNaN(date.getTime())) return Promise.reject('Invalid date');
+		date = date.toISOString();
+		await this.client.voiceStates.requestSpeak(this.guildId, date);
+		this.requestToSpeakTimestamp = date;
+	}
+
+	disconnect(reason?: string): Promise<GuildMemberStructure> {
 		return this.setChannel(null, reason);
 	}
 
-	async setChannel(channel_id: null | string, reason?: string) {
-		return this.client.members.edit(this.guildId, this.userId, { channel_id }, reason).then(member => {
-			this.channelId = channel_id;
-			return member;
-		});
+	async fetch(force = false): Promise<VoiceStateStructure> {
+		const member = this.withMember ?? (await this.member(force));
+		return this.client.members.voice(this.guildId, member.id, force);
+	}
+
+	async setChannel(channel_id: null | string, reason?: string): Promise<GuildMemberStructure> {
+		const member = await this.client.members.edit(this.guildId, this.userId, { channel_id }, reason);
+		this.channelId = channel_id;
+		return member;
+	}
+
+	guild(mode?: 'rest' | 'flow'): Promise<GuildStructure<'cached' | 'api'>>;
+	guild(mode: 'cache'): ReturnCache<GuildStructure<'cached'> | undefined>;
+	guild(mode: 'cache' | 'rest' | 'flow' = 'flow') {
+		switch (mode) {
+			case 'cache':
+				return (
+					this.client.cache.guilds?.get(this.guildId) ||
+					(this.client.cache.adapter.isAsync ? (Promise.resolve() as any) : undefined)
+				);
+			default:
+				return this.client.guilds.fetch(this.guildId, mode === 'rest');
+		}
 	}
 }

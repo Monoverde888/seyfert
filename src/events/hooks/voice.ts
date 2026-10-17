@@ -1,7 +1,13 @@
-import type { GatewayVoiceServerUpdateDispatchData, GatewayVoiceStateUpdateDispatchData } from '../../types';
-import { toCamelCase } from '../../common';
-import { VoiceState } from '../../structures';
+import { Transformers, type VoiceChannelStructure, type VoiceStateStructure } from '../../client/transformers';
 import type { UsingClient } from '../../commands';
+import { type ObjectToLower, toCamelCase } from '../../common';
+import type {
+	GatewayVoiceChannelEffectSendDispachData,
+	GatewayVoiceChannelStartTimeUpdateDispatchData,
+	GatewayVoiceChannelStatusUpdateDispatchData,
+	GatewayVoiceServerUpdateDispatchData,
+	GatewayVoiceStateUpdateDispatchData,
+} from '../../types';
 
 export const VOICE_SERVER_UPDATE = (_self: UsingClient, data: GatewayVoiceServerUpdateDispatchData) => {
 	return toCamelCase(data);
@@ -10,7 +16,28 @@ export const VOICE_SERVER_UPDATE = (_self: UsingClient, data: GatewayVoiceServer
 export const VOICE_STATE_UPDATE = async (
 	self: UsingClient,
 	data: GatewayVoiceStateUpdateDispatchData,
-): Promise<[VoiceState] | [state: VoiceState, old?: VoiceState]> => {
-	if (!data.guild_id) return [new VoiceState(self, data)];
-	return [new VoiceState(self, data), await self.cache.voiceStates?.get(data.user_id, data.guild_id)];
+): Promise<[state: VoiceStateStructure] | [state: VoiceStateStructure, old?: VoiceStateStructure]> => {
+	if (!data.guild_id) return [Transformers.VoiceState(self, data)];
+	return [Transformers.VoiceState(self, data), await self.cache.voiceStates?.get(data.user_id, data.guild_id)];
+};
+
+export const VOICE_CHANNEL_EFFECT_SEND = (_self: UsingClient, data: GatewayVoiceChannelEffectSendDispachData) => {
+	return toCamelCase(data);
+};
+
+export const VOICE_CHANNEL_STATUS_UPDATE = async (
+	self: UsingClient,
+	data: GatewayVoiceChannelStatusUpdateDispatchData,
+): Promise<
+	[status: ObjectToLower<GatewayVoiceChannelStatusUpdateDispatchData>, channel: VoiceChannelStructure | undefined]
+> => {
+	const channel = await self.cache.channels?.get(data.id);
+	return [toCamelCase(data), channel?.isVoice() ? channel : undefined];
+};
+
+export const VOICE_CHANNEL_START_TIME_UPDATE = (
+	_self: UsingClient,
+	data: GatewayVoiceChannelStartTimeUpdateDispatchData,
+) => {
+	return toCamelCase(data);
 };

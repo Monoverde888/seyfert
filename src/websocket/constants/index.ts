@@ -1,15 +1,17 @@
-import type { GatewayDispatchPayload } from 'discord-api-types/v10';
+import type { DeepPartial } from '../../common';
 import type { ShardManagerOptions, WorkerManagerOptions } from '../discord';
 
 const COMPRESS = false;
 
+const propertiesVersion = 'Seyfert v5.1.0 (https://seyfert.dev)';
+
 const properties = {
 	os: process.platform,
-	browser: 'Seyfert',
-	device: 'Seyfert',
+	browser: propertiesVersion,
+	device: propertiesVersion,
 };
 
-const ShardManagerDefaults: Partial<ShardManagerOptions> = {
+const ShardManagerDefaults: DeepPartial<ShardManagerOptions> = {
 	totalShards: 1,
 	spawnShardDelay: 5300,
 	debug: false,
@@ -17,15 +19,16 @@ const ShardManagerDefaults: Partial<ShardManagerOptions> = {
 	properties,
 	version: 10,
 	shardStart: 0,
-	handlePayload: (shardId: number, packet: GatewayDispatchPayload): void => {
-		console.info(`Packet ${packet.t} on shard ${shardId}`);
+	resharding: {
+		interval: 8 * 60 * 60 * 1e3, // 8h
+		percentage: 80,
 	},
 };
 
-const WorkerManagerDefaults: Partial<WorkerManagerOptions> = {
+const WorkerManagerDefaults: DeepPartial<WorkerManagerOptions> = {
 	...ShardManagerDefaults,
-	shardsPerWorker: 32,
-	handlePayload: (_shardId: number, _workerId: number, _packet: GatewayDispatchPayload): void => {},
+	mode: 'threads',
+	shardsPerWorker: 8,
 };
 
 export interface IdentifyProperties {
@@ -44,4 +47,4 @@ export interface IdentifyProperties {
 	device: string;
 }
 
-export { COMPRESS, ShardManagerDefaults, WorkerManagerDefaults, properties };
+export { COMPRESS, properties, ShardManagerDefaults, WorkerManagerDefaults };

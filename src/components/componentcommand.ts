@@ -1,6 +1,8 @@
-import { ComponentType } from 'discord-api-types/v10';
-import type { ContextComponentCommandInteractionMap, ComponentContext } from './componentcontext';
-import type { ExtraProps, RegisteredMiddlewares, UsingClient } from '../commands';
+import type { PluginMiddlewareDenialMetadata } from '../client/plugins/types';
+import type { ExtraProps, ResolvedRegisteredMiddlewares, UsingClient } from '../commands';
+import { ComponentType } from '../types';
+import type { ComponentContext, ContextComponentCommandInteractionMap } from './componentcontext';
+import { matchesCustomId } from './customId';
 
 export const InteractionCommandType = {
 	COMPONENT: 0,
@@ -14,10 +16,20 @@ export interface ComponentCommand {
 export abstract class ComponentCommand {
 	type = InteractionCommandType.COMPONENT;
 	abstract componentType: keyof ContextComponentCommandInteractionMap;
-	abstract filter(context: ComponentContext<typeof this.componentType>): Promise<boolean> | boolean;
+	customId?: string | RegExp;
+	filter?(context: ComponentContext<typeof this.componentType>): Promise<boolean> | boolean;
 	abstract run(context: ComponentContext<typeof this.componentType>): any;
 
-	middlewares: (keyof RegisteredMiddlewares)[] = [];
+	/** @internal */
+	_filter(context: ComponentContext) {
+		if (this.customId) {
+			if (!matchesCustomId(this.customId, context.customId)) return false;
+		}
+		if (this.filter) return this.filter(context);
+		return true;
+	}
+
+	middlewares: readonly (keyof ResolvedRegisteredMiddlewares)[] = [];
 
 	props!: ExtraProps;
 
@@ -25,8 +37,13 @@ export abstract class ComponentCommand {
 		return ComponentType[this.componentType];
 	}
 
-	onAfterRun?(context: ComponentContext, error: unknown | undefined): any;
-	onRunError?(context: ComponentContext, error: unknown): any;
-	onMiddlewaresError?(context: ComponentContext, error: string): any;
-	onInternalError?(client: UsingClient, error?: unknown): any;
+	onBeforeMiddlewares?(context: ComponentContext<typeof this.componentType>): any;
+	onAfterRun?(context: ComponentContext<typeof this.componentType>, error: unknown | undefined): any;
+	onRunError?(context: ComponentContext<typeof this.componentType>, error: unknown): any;
+	onMiddlewaresError?(
+		context: ComponentContext<typeof this.componentType>,
+		error: string,
+		metadata: PluginMiddlewareDenialMetadata,
+	): any;
+	onInternalError?(client: UsingClient, component: ComponentCommand, error?: unknown): any;
 }

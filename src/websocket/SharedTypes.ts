@@ -1,67 +1,75 @@
-import {
-	type APIAuditLogEntry,
-	type APIAutoModerationRule,
-	type APIChannel,
-	type APIEntitlement,
-	type APIGuild,
-	type APIGuildMember,
-	type APIGuildScheduledEvent,
-	type APIStageInstance,
-	type APIUser,
-	type GatewayActivity,
-	type GatewayAutoModerationActionExecutionDispatchData,
-	type GatewayChannelPinsUpdateDispatchData,
-	type GatewayChannelUpdateDispatchData,
-	GatewayDispatchEvents,
-	type GatewayGuildBanAddDispatchData,
-	type GatewayGuildBanRemoveDispatchData,
-	type GatewayGuildCreateDispatchData,
-	type GatewayGuildDeleteDispatchData,
-	type GatewayGuildEmojisUpdateDispatchData,
-	type GatewayGuildIntegrationsUpdateDispatchData,
-	type GatewayGuildMemberRemoveDispatchData,
-	type GatewayGuildMemberUpdateDispatchData,
-	type GatewayGuildMembersChunkDispatchData,
-	type GatewayGuildRoleCreateDispatchData,
-	type GatewayGuildRoleDeleteDispatchData,
-	type GatewayGuildRoleUpdateDispatchData,
-	type GatewayGuildScheduledEventUserRemoveDispatchData,
-	type GatewayGuildStickersUpdateDispatchData,
-	type GatewayIntegrationCreateDispatchData,
-	type GatewayIntegrationDeleteDispatchData,
-	type GatewayInteractionCreateDispatchData,
-	type GatewayInviteCreateDispatchData,
-	type GatewayInviteDeleteDispatchData,
-	type GatewayMessageCreateDispatchData,
-	type GatewayMessageDeleteBulkDispatchData,
-	type GatewayMessageDeleteDispatchData,
-	type GatewayMessageReactionAddDispatchData,
-	type GatewayMessageReactionRemoveAllDispatchData,
-	type GatewayMessageReactionRemoveDispatchData,
-	type GatewayMessageReactionRemoveEmojiDispatchData,
-	type GatewayMessageUpdateDispatchData,
-	type GatewayPresenceUpdateData,
-	type GatewayPresenceUpdateDispatchData,
-	type GatewayReadyDispatchData,
-	type GatewayRequestGuildMembersDataWithQuery,
-	type GatewayRequestGuildMembersDataWithUserIds,
-	type GatewayThreadCreateDispatchData,
-	type GatewayThreadDeleteDispatchData,
-	type GatewayThreadListSyncDispatchData,
-	type GatewayThreadMemberUpdateDispatchData,
-	type GatewayThreadMembersUpdateDispatchData,
-	type GatewayTypingStartDispatchData,
-	type GatewayUserUpdateDispatchData,
-	type GatewayVoiceServerUpdateDispatchData,
-	type GatewayVoiceStateUpdateData,
-	type GatewayWebhooksUpdateDispatchData,
-	type PresenceUpdateStatus,
-	type GatewayMessagePollVoteDispatchData,
-} from 'discord-api-types/v10';
 import type { RestToKeys } from '../common';
-import type { GatewayGuildMemberAddDispatchDataFixed } from '../structures';
+import type {
+	APIAuditLogEntry,
+	APIAutoModerationRule,
+	APIChannel,
+	APIEntitlement,
+	APIGuild,
+	APIGuildMember,
+	APIGuildScheduledEvent,
+	APIStageInstance,
+	APISubscription,
+	APIUser,
+	GatewayActivity,
+	GatewayAutoModerationActionExecutionDispatchData,
+	GatewayChannelPinsUpdateDispatchData,
+	GatewayChannelUpdateDispatchData,
+	GatewayDispatchEvents,
+	GatewayEntitlementCreateDispatchData,
+	GatewayGuildBanAddDispatchData,
+	GatewayGuildBanRemoveDispatchData,
+	GatewayGuildCreateDispatchData,
+	GatewayGuildDeleteDispatchData,
+	GatewayGuildEmojisUpdateDispatchData,
+	GatewayGuildIntegrationsUpdateDispatchData,
+	GatewayGuildMemberAddDispatchData,
+	GatewayGuildMemberRemoveDispatchData,
+	GatewayGuildMembersChunkDispatchData,
+	GatewayGuildMemberUpdateDispatchData,
+	GatewayGuildRoleCreateDispatchData,
+	GatewayGuildRoleDeleteDispatchData,
+	GatewayGuildRoleUpdateDispatchData,
+	GatewayGuildScheduledEventUserRemoveDispatchData,
+	GatewayGuildSoundboardSoundDeleteDispatchData,
+	GatewayGuildSoundboardSoundsUpdateDispatchData,
+	GatewayGuildStickersUpdateDispatchData,
+	GatewayIntegrationCreateDispatchData,
+	GatewayIntegrationDeleteDispatchData,
+	GatewayInteractionCreateDispatchData,
+	GatewayInviteCreateDispatchData,
+	GatewayInviteDeleteDispatchData,
+	GatewayMessageCreateDispatchData,
+	GatewayMessageDeleteBulkDispatchData,
+	GatewayMessageDeleteDispatchData,
+	GatewayMessagePollVoteDispatchData,
+	GatewayMessageReactionAddDispatchData,
+	GatewayMessageReactionRemoveAllDispatchData,
+	GatewayMessageReactionRemoveDispatchData,
+	GatewayMessageReactionRemoveEmojiDispatchData,
+	GatewayMessageUpdateDispatchData,
+	GatewayPresenceUpdateData,
+	GatewayPresenceUpdateDispatchData,
+	GatewayReadyDispatchData,
+	GatewayRequestGuildMembersDataWithQuery,
+	GatewayRequestGuildMembersDataWithUserIds,
+	GatewaySoundboardSoundsDispatchData,
+	GatewayThreadCreateDispatchData,
+	GatewayThreadDeleteDispatchData,
+	GatewayThreadListSyncDispatchData,
+	GatewayThreadMembersUpdateDispatchData,
+	GatewayThreadMemberUpdateDispatchData,
+	GatewayThreadUpdateDispatchData,
+	GatewayTypingStartDispatchData,
+	GatewayUserUpdateDispatchData,
+	GatewayVoiceChannelEffectSendDispachData,
+	GatewayVoiceServerUpdateDispatchData,
+	GatewayVoiceStateUpdateData,
+	GatewayWebhooksUpdateDispatchData,
+	PresenceUpdateStatus,
+} from '../types';
+import type { APISoundboardSound } from '../types/payloads/soundboard';
 
-/** https://discord.com/developers/docs/topics/gateway-events#update-presence */
+/** https://docs.discord.com/developers/topics/gateway-events#update-presence */
 export interface StatusUpdate {
 	/** The user's activities */
 	activities?: Omit<GatewayActivity, 'created_at' | 'id'>[];
@@ -69,7 +77,7 @@ export interface StatusUpdate {
 	status: PresenceUpdateStatus;
 }
 
-/** https://discord.com/developers/docs/topics/gateway#update-voice-state */
+/** https://docs.discord.com/developers/topics/gateway#update-voice-state */
 export interface UpdateVoiceState {
 	/** id of the guild */
 	guild_id: string;
@@ -106,7 +114,7 @@ export interface Events {
 	[GatewayDispatchEvents.AutoModerationActionExecution]: GatewayAutoModerationActionExecutionDispatchData;
 	[GatewayDispatchEvents.ThreadCreate]: GatewayThreadCreateDispatchData;
 	[GatewayDispatchEvents.ThreadDelete]: GatewayThreadDeleteDispatchData;
-	[GatewayDispatchEvents.ThreadUpdate]: GatewayThreadDeleteDispatchData;
+	[GatewayDispatchEvents.ThreadUpdate]: GatewayThreadUpdateDispatchData;
 	[GatewayDispatchEvents.ThreadListSync]: GatewayThreadListSyncDispatchData;
 	[GatewayDispatchEvents.ThreadMemberUpdate]: GatewayThreadMemberUpdateDispatchData;
 	[GatewayDispatchEvents.ThreadMembersUpdate]: GatewayThreadMembersUpdateDispatchData;
@@ -120,7 +128,10 @@ export interface Events {
 	[GatewayDispatchEvents.GuildEmojisUpdate]: GatewayGuildEmojisUpdateDispatchData;
 	[GatewayDispatchEvents.GuildStickersUpdate]: GatewayGuildStickersUpdateDispatchData;
 	[GatewayDispatchEvents.GuildIntegrationsUpdate]: GatewayGuildIntegrationsUpdateDispatchData;
-	[GatewayDispatchEvents.GuildMemberAdd]: GatewayGuildMemberAddDispatchDataFixed<boolean>;
+	[GatewayDispatchEvents.GuildSoundboardSoundsUpdate]: GatewayGuildSoundboardSoundsUpdateDispatchData;
+	[GatewayDispatchEvents.GuildSoundboardSoundDelete]: GatewayGuildSoundboardSoundDeleteDispatchData;
+	[GatewayDispatchEvents.SoundboardSounds]: GatewaySoundboardSoundsDispatchData;
+	[GatewayDispatchEvents.GuildMemberAdd]: GatewayGuildMemberAddDispatchData;
 	[GatewayDispatchEvents.GuildMemberRemove]: GatewayGuildMemberRemoveDispatchData;
 	[GatewayDispatchEvents.GuildMemberUpdate]: GatewayGuildMemberUpdateDispatchData;
 	[GatewayDispatchEvents.GuildMembersChunk]: GatewayGuildMembersChunkDispatchData;
@@ -141,10 +152,12 @@ export interface Events {
 	[GatewayDispatchEvents.PresenceUpdate]: GatewayPresenceUpdateDispatchData;
 	[GatewayDispatchEvents.TypingStart]: GatewayTypingStartDispatchData;
 	[GatewayDispatchEvents.UserUpdate]: GatewayUserUpdateDispatchData;
+	[GatewayDispatchEvents.VoiceChannelEffectSend]: GatewayVoiceChannelEffectSendDispachData;
 	[GatewayDispatchEvents.VoiceStateUpdate]: GatewayVoiceStateUpdateData;
 	[GatewayDispatchEvents.VoiceServerUpdate]: GatewayVoiceServerUpdateDispatchData;
 	[GatewayDispatchEvents.WebhooksUpdate]: GatewayWebhooksUpdateDispatchData;
 	[GatewayDispatchEvents.InteractionCreate]: GatewayInteractionCreateDispatchData;
+	[GatewayDispatchEvents.EntitlementCreate]: GatewayEntitlementCreateDispatchData;
 }
 
 export type StageSameEvents = RestToKeys<
@@ -198,7 +211,7 @@ export type ChannelSameEvents = RestToKeys<
 	]
 >;
 
-export type AutoModetaractionRuleEvents = RestToKeys<
+export type AutoModerationRuleEvents = RestToKeys<
 	[
 		APIAutoModerationRule,
 		GatewayDispatchEvents.AutoModerationRuleCreate,
@@ -208,22 +221,38 @@ export type AutoModetaractionRuleEvents = RestToKeys<
 >;
 
 export type EntitlementEvents = RestToKeys<
+	[APIEntitlement, GatewayDispatchEvents.EntitlementDelete, GatewayDispatchEvents.EntitlementUpdate]
+>;
+
+export type SubscriptionEvents = RestToKeys<
 	[
-		APIEntitlement,
-		GatewayDispatchEvents.EntitlementCreate,
-		GatewayDispatchEvents.EntitlementDelete,
-		GatewayDispatchEvents.EntitlementUpdate,
+		APISubscription,
+		GatewayDispatchEvents.SubscriptionCreate,
+		GatewayDispatchEvents.SubscriptionDelete,
+		GatewayDispatchEvents.SubscriptionUpdate,
+	]
+>;
+
+export type SoundboardSoundsEvents = RestToKeys<
+	[
+		APISoundboardSound,
+		GatewayDispatchEvents.GuildSoundboardSoundCreate,
+		GatewayDispatchEvents.GuildSoundboardSoundUpdate,
 	]
 >;
 
 export type NormalizeEvents = Events &
-	AutoModetaractionRuleEvents &
+	AutoModerationRuleEvents &
 	ChannelSameEvents &
 	GuildScheduledSameEvents &
 	GuildScheduledUserSameEvents &
 	IntegrationSameEvents &
 	EntitlementEvents &
 	PollVoteSameEvents &
-	StageSameEvents & { RAW: GatewayDispatchEvents };
+	StageSameEvents &
+	SubscriptionEvents &
+	SoundboardSoundsEvents & {
+		RAW: GatewayDispatchEvents;
+	};
 
 export type GatewayEvents = { [x in keyof NormalizeEvents]: NormalizeEvents[x] };

@@ -1,8 +1,44 @@
+import { Attachment, AttachmentBuilder, PollBuilder, resolveAttachment } from '../builders';
+import type { ReturnCache } from '../cache';
+import type { Overwrites } from '../cache/resources/overwrites';
 import {
-	ChannelFlags,
-	ChannelType,
-	type RESTAPIAttachment,
-	VideoQualityMode,
+	type BaseChannelStructure,
+	type BaseGuildChannelStructure,
+	type CategoryChannelStructure,
+	type DirectoryChannelStructure,
+	type DMChannelStructure,
+	type ForumChannelStructure,
+	type GroupDMChannelStructure,
+	type GuildMemberStructure,
+	type GuildStructure,
+	type MediaChannelStructure,
+	type MessageStructure,
+	type NewsChannelStructure,
+	type StageChannelStructure,
+	type TextGuildChannelStructure,
+	type ThreadChannelStructure,
+	Transformers,
+	type UserStructure,
+	type VoiceChannelStructure,
+	type VoiceStateStructure,
+	type WebhookStructure,
+} from '../client/transformers';
+import type { SeyfertChannelMap, UsingClient } from '../commands';
+import { Formatter } from '../common/it/formatter';
+import { fakePromise } from '../common/it/utils';
+import type { ChannelShorterOverwriteBody } from '../common/shorters/channels';
+import type { CreateInviteFromChannel } from '../common/shorters/invites';
+import type { MethodContext } from '../common/types/options';
+import type { EmojiResolvable } from '../common/types/resolvables';
+import type { ObjectToLower, StringToNumber, ToClass } from '../common/types/util';
+import type {
+	MessageCreateBodyRequest,
+	MessageUpdateBodyRequest,
+	ResolverProps,
+	ThreadOnlyCreateBodyRequest,
+} from '../common/types/write';
+import { mix } from '../deps/mixer';
+import {
 	type APIChannelBase,
 	type APIDMChannel,
 	type APIGuildCategoryChannel,
@@ -13,42 +49,31 @@ import {
 	type APIGuildMediaChannel,
 	type APIGuildStageVoiceChannel,
 	type APIGuildVoiceChannel,
+	type APIInteractionDataResolvedChannel,
 	type APINewsChannel,
 	type APITextChannel,
 	type APIThreadChannel,
+	ChannelFlags,
+	ChannelType,
 	type RESTGetAPIChannelMessageReactionUsersQuery,
+	type RESTGetAPIChannelMessagesPinsQuery,
+	type RESTGetAPIChannelMessagesQuery,
 	type RESTPatchAPIChannelJSONBody,
 	type RESTPatchAPIGuildChannelPositionsJSONBody,
 	type RESTPostAPIChannelWebhookJSONBody,
 	type RESTPostAPIGuildChannelJSONBody,
-	type RESTPostAPIGuildForumThreadsJSONBody,
 	type SortOrderType,
 	type ThreadAutoArchiveDuration,
-} from 'discord-api-types/v10';
-import { mix } from 'ts-mixer';
-import { ActionRow, Embed, PollBuilder, resolveAttachment } from '../builders';
-import type { UsingClient } from '../commands';
-import type {
-	EmojiResolvable,
-	MessageCreateBodyRequest,
-	MessageUpdateBodyRequest,
-	MethodContext,
-	ObjectToLower,
-	StringToNumber,
-	ToClass,
-} from '../common';
+	VideoQualityMode,
+} from '../types';
+import { DiscordBase } from './extra/DiscordBase';
+import { PermissionsBitField } from './extra/Permissions';
 import type { GuildMember } from './GuildMember';
 import type { GuildRole } from './GuildRole';
-import { DiscordBase } from './extra/DiscordBase';
-import { channelLink } from './extra/functions';
-import { Collection, type RawFile } from '..';
+import { StageInstance } from './StageInstance';
 
-export class BaseChannel<T extends ChannelType> extends DiscordBase<APIChannelBase<ChannelType>> {
+export class BaseNoEditableChannel<T extends ChannelType> extends DiscordBase<APIChannelBase<ChannelType>> {
 	declare type: T;
-
-	constructor(client: UsingClient, data: APIChannelBase<ChannelType>) {
-		super(client, data);
-	}
 
 	static __intent__(id: '@me'): 'DirectMessages';
 	static __intent__(id: string): 'DirectMessages' | 'Guilds';
@@ -58,26 +83,29 @@ export class BaseChannel<T extends ChannelType> extends DiscordBase<APIChannelBa
 
 	/** The URL to the channel */
 	get url() {
-		return channelLink(this.id);
+		return Formatter.channelLink(this.id);
 	}
 
-	fetch(force = false) {
-		return this.client.channels.fetch(this.id, force);
+	fetch(mode?: 'rest' | 'flow'): Promise<AllChannels>;
+	fetch(mode: 'cache'): ReturnCache<AllChannels | undefined>;
+	fetch(mode: 'cache' | 'rest' | 'flow' = 'flow') {
+		switch (mode) {
+			case 'cache':
+				return (
+					this.client.cache.channels?.get(this.id) ||
+					(this.client.cache.adapter.isAsync ? (Promise.resolve() as any) : undefined)
+				);
+			default:
+				return this.client.channels.fetch(this.id, mode === 'rest');
+		}
 	}
 
-	delete(reason?: string) {
-		return this.client.channels.delete(this.id, { reason });
-	}
-
-	edit(body: RESTPatchAPIChannelJSONBody, reason?: string) {
-		return this.client.channels.edit(this.id, body, {
-			reason,
-			guildId: 'guildId' in this ? (this.guildId as string) : '@me',
-		});
+	delete(reason?: string): Promise<this> {
+		return this.client.channels.delete(this.id, { reason }) as unknown as Promise<this>;
 	}
 
 	toString() {
-		return `<#${this.id}>`;
+		return Formatter.channelMention(this.id);
 	}
 
 	isStage(): this is StageChannel {
@@ -128,6 +156,14 @@ export class BaseChannel<T extends ChannelType> extends DiscordBase<APIChannelBa
 		return !this.isDM() && this.isTextable();
 	}
 
+	isNamed(): this is AllNamedChannels {
+		return typeof (this as { name?: unknown }).name === 'string';
+	}
+
+	isGuild(): this is AllGuildChannels | BaseGuildChannelStructure {
+		return !this.isDM();
+	}
+
 	isThreadOnly(): this is ForumChannel | MediaChannel {
 		return this.isForum() || this.isMedia();
 	}
@@ -138,15 +174,29 @@ export class BaseChannel<T extends ChannelType> extends DiscordBase<APIChannelBa
 
 	static allMethods(ctx: MethodContext<{ guildId: string }>) {
 		return {
-			list: (force = false) => ctx.client.guilds.channels.list(ctx.guildId, force),
-			fetch: (id: string, force = false) => ctx.client.guilds.channels.fetch(ctx.guildId, id, force),
-			create: (body: RESTPostAPIGuildChannelJSONBody) => ctx.client.guilds.channels.create(ctx.guildId, body),
-			delete: (id: string, reason?: string) => ctx.client.guilds.channels.delete(ctx.guildId, id, reason),
-			edit: (id: string, body: RESTPatchAPIChannelJSONBody, reason?: string) =>
+			list: (force = false): Promise<AllChannels[]> => ctx.client.guilds.channels.list(ctx.guildId, force),
+			fetch: (id: string, force = false): Promise<AllChannels> =>
+				ctx.client.guilds.channels.fetch(ctx.guildId, id, force),
+			create: <T extends GuildChannelTypes = GuildChannelTypes>(
+				body: RESTPostAPIGuildChannelJSONBody & { type: T },
+			): Promise<SeyfertChannelMap[T]> =>
+				ctx.client.guilds.channels.create(ctx.guildId, body as never) as Promise<SeyfertChannelMap[T]>,
+			delete: (id: string, reason?: string): Promise<AllChannels> =>
+				ctx.client.guilds.channels.delete(ctx.guildId, id, reason),
+			edit: (id: string, body: RESTPatchAPIChannelJSONBody, reason?: string): Promise<AllChannels> =>
 				ctx.client.guilds.channels.edit(ctx.guildId, id, body, reason),
 			editPositions: (body: RESTPatchAPIGuildChannelPositionsJSONBody) =>
 				ctx.client.guilds.channels.editPositions(ctx.guildId, body),
 		};
+	}
+}
+
+export class BaseChannel<T extends ChannelType> extends BaseNoEditableChannel<T> {
+	edit(body: RESTPatchAPIChannelJSONBody, reason?: string): Promise<this> {
+		return this.client.channels.edit(this.id, body, {
+			reason,
+			guildId: 'guildId' in this ? (this.guildId as string) : '@me',
+		}) as Promise<this>;
 	}
 }
 
@@ -167,14 +217,38 @@ interface IChannelTypes {
 
 export interface BaseGuildChannel extends ObjectToLower<Omit<APIGuildChannel<ChannelType>, 'permission_overwrites'>> {}
 export class BaseGuildChannel extends BaseChannel<ChannelType> {
+	declare guildId: string;
+
 	constructor(client: UsingClient, data: APIGuildChannel<ChannelType>) {
 		const { permission_overwrites, ...rest } = data;
 		super(client, rest);
 	}
 
+	invites = {
+		list: () => this.client.invites.channels.list(this.id),
+		create: (data: Omit<CreateInviteFromChannel, 'channelId'>) =>
+			this.client.invites.channels.create({
+				...data,
+				channelId: this.id,
+			}),
+		delete: (code: string, reason?: string) => this.client.invites.delete(code, reason),
+	};
+
 	permissionOverwrites = {
-		fetch: () => this.client.cache.overwrites?.get(this.id),
-		values: () => (this.guildId ? this.client.cache.overwrites?.values(this.guildId) ?? [] : []),
+		fetch: (): ReturnType<Overwrites['get']> =>
+			this.client.cache.overwrites?.get(this.id) ||
+			(this.client.cache.adapter.isAsync ? (Promise.resolve() as never) : undefined),
+		values: (): ReturnCache<ReturnType<Overwrites['values']>> =>
+			this.guildId
+				? this.client.cache.overwrites?.values(this.guildId) ||
+					(this.client.cache.adapter.isAsync ? (Promise.resolve([]) as never) : [])
+				: this.client.cache.adapter.isAsync
+					? (Promise.resolve([]) as never)
+					: [],
+		edit: (overwriteId: string, body: ChannelShorterOverwriteBody, reason?: string) =>
+			this.client.channels.editOverwrite(this.id, overwriteId, body, { guildId: this.guildId, reason }),
+		delete: (overwriteId: string, reason?: string) =>
+			this.client.channels.deleteOverwrite(this.id, overwriteId, { guildId: this.guildId, reason }),
 	};
 
 	memberPermissions(member: GuildMember, checkAdmin = true) {
@@ -189,12 +263,22 @@ export class BaseGuildChannel extends BaseChannel<ChannelType> {
 		return this.client.channels.overwritesFor(this.id, member);
 	}
 
-	guild(force = false) {
-		return this.client.guilds.fetch(this.guildId!, force);
+	guild(mode?: 'rest' | 'flow'): Promise<GuildStructure<'cached' | 'api'>>;
+	guild(mode: 'cache'): ReturnCache<GuildStructure<'cached'> | undefined>;
+	guild(mode: 'cache' | 'rest' | 'flow' = 'flow') {
+		switch (mode) {
+			case 'cache':
+				return (
+					this.client.cache.guilds?.get(this.guildId) ||
+					(this.client.cache.adapter.isAsync ? (Promise.resolve() as any) : undefined)
+				);
+			default:
+				return this.client.guilds.fetch(this.guildId, mode === 'rest');
+		}
 	}
 
 	get url() {
-		return channelLink(this.id, this.guildId);
+		return Formatter.channelLink(this.id, this.guildId);
 	}
 
 	setPosition(position: number, reason?: string) {
@@ -208,9 +292,17 @@ export class BaseGuildChannel extends BaseChannel<ChannelType> {
 	setParent(parent_id: string | null, reason?: string) {
 		return this.edit({ parent_id }, reason);
 	}
+
+	setRatelimitPerUser(rate_limit_per_user: number | null | undefined) {
+		return this.edit({ rate_limit_per_user });
+	}
+
+	setNsfw(nsfw = true, reason?: string) {
+		return this.edit({ nsfw }, reason);
+	}
 }
 
-export interface MessagesMethods extends BaseChannel<ChannelType> {}
+export interface MessagesMethods extends BaseNoEditableChannel<ChannelType> {}
 export class MessagesMethods extends DiscordBase {
 	typing() {
 		return this.client.channels.typing(this.id);
@@ -228,14 +320,18 @@ export class MessagesMethods extends DiscordBase {
 
 	static messages(ctx: MethodContext<{ channelId: string }>) {
 		return {
-			write: (body: MessageCreateBodyRequest) => ctx.client.messages.write(ctx.channelId, body),
-			edit: (messageId: string, body: MessageUpdateBodyRequest) =>
+			write: (body: MessageCreateBodyRequest): Promise<MessageStructure> =>
+				ctx.client.messages.write(ctx.channelId, body),
+			edit: (messageId: string, body: MessageUpdateBodyRequest): Promise<MessageStructure> =>
 				ctx.client.messages.edit(messageId, ctx.channelId, body),
-			crosspost: (messageId: string, reason?: string) =>
+			crosspost: (messageId: string, reason?: string): Promise<MessageStructure> =>
 				ctx.client.messages.crosspost(messageId, ctx.channelId, reason),
 			delete: (messageId: string, reason?: string) => ctx.client.messages.delete(messageId, ctx.channelId, reason),
-			fetch: (messageId: string) => ctx.client.messages.fetch(messageId, ctx.channelId),
+			fetch: (messageId: string, force = false): Promise<MessageStructure> =>
+				ctx.client.messages.fetch(messageId, ctx.channelId, force),
 			purge: (messages: string[], reason?: string) => ctx.client.messages.purge(messages, ctx.channelId, reason),
+			list: (fetchOptions?: RESTGetAPIChannelMessagesQuery): Promise<MessageStructure[]> =>
+				ctx.client.messages.list(ctx.channelId, fetchOptions),
 		};
 	}
 
@@ -244,15 +340,19 @@ export class MessagesMethods extends DiscordBase {
 			add: (messageId: string, emoji: EmojiResolvable) => ctx.client.reactions.add(messageId, ctx.channelId, emoji),
 			delete: (messageId: string, emoji: EmojiResolvable, userId = '@me') =>
 				ctx.client.reactions.delete(messageId, ctx.channelId, emoji, userId),
-			fetch: (messageId: string, emoji: EmojiResolvable, query?: RESTGetAPIChannelMessageReactionUsersQuery) =>
-				ctx.client.reactions.fetch(messageId, ctx.channelId, emoji, query),
+			fetch: (
+				messageId: string,
+				emoji: EmojiResolvable,
+				query?: RESTGetAPIChannelMessageReactionUsersQuery,
+			): Promise<UserStructure[]> => ctx.client.reactions.fetch(messageId, ctx.channelId, emoji, query),
 			purge: (messageId: string, emoji?: EmojiResolvable) =>
 				ctx.client.reactions.purge(messageId, ctx.channelId, emoji),
 		};
 	}
+
 	static pins(ctx: MethodContext<{ channelId: string }>) {
 		return {
-			fetch: () => ctx.client.channels.pins(ctx.channelId),
+			fetch: (query?: RESTGetAPIChannelMessagesPinsQuery) => ctx.client.channels.pins(ctx.channelId, query),
 			set: (messageId: string, reason?: string) => ctx.client.channels.setPin(messageId, ctx.channelId, reason),
 			delete: (messageId: string, reason?: string) => ctx.client.channels.deletePin(messageId, ctx.channelId, reason),
 		};
@@ -260,66 +360,124 @@ export class MessagesMethods extends DiscordBase {
 
 	static transformMessageBody<T>(
 		body: MessageCreateBodyRequest | MessageUpdateBodyRequest,
-		files: RawFile[] | undefined,
+		files: ResolverProps['files'],
 		self: UsingClient,
 	) {
 		const poll = (body as MessageCreateBodyRequest).poll;
-		return {
+		const payload = {
 			allowed_mentions: self.options?.allowedMentions,
 			...body,
-			components: body.components?.map(x => (x instanceof ActionRow ? x.toJSON() : x)) ?? undefined,
-			embeds: body.embeds?.map(x => (x instanceof Embed ? x.toJSON() : x)) ?? undefined,
-			attachments:
-				'attachments' in body
-					? body.attachments?.map((x, i) => ({
-							id: i,
-							...resolveAttachment(x),
-						})) ?? undefined
-					: (files?.map((x, id) => ({
-							id,
-							filename: x.name,
-						})) as RESTAPIAttachment[]),
+			embeds: body.embeds?.map(x => ('toJSON' in x ? x.toJSON() : x)),
+			components: body.components?.map(x => ('toJSON' in x ? x.toJSON() : x)) ?? undefined,
 			poll: poll ? (poll instanceof PollBuilder ? poll.toJSON() : poll) : undefined,
-		} as T;
+		};
+
+		if ('attachments' in body) {
+			payload.attachments =
+				body.attachments?.map((x, i) => {
+					if (x instanceof Attachment) {
+						return {
+							id: x.id ?? i.toString(),
+							title: x.title,
+							description: x.description,
+							filename: x.filename,
+							is_spoiler: x.spoiler,
+						};
+					}
+					return {
+						id: i.toString(),
+						...resolveAttachment(x),
+					};
+				}) ?? undefined;
+		} else if (files?.length) {
+			payload.attachments = files.map((file, i) => {
+				if (file instanceof AttachmentBuilder) return { id: i.toString(), ...resolveAttachment(file) };
+				if (file instanceof Attachment) {
+					return {
+						id: i.toString(),
+						title: file.title,
+						description: file.description,
+						filename: file.filename,
+						is_spoiler: file.spoiler,
+					};
+				}
+				return { id: i.toString(), filename: file.filename };
+			});
+		}
+		return payload as T;
 	}
 }
 
 export interface TextBaseGuildChannel
-	extends ObjectToLower<Omit<APITextChannel, 'type' | 'permission_overwrites'>>,
+	extends ObjectToLower<Omit<APITextChannel, 'type' | 'permission_overwrites' | 'guild_id'>>,
 		MessagesMethods {}
 @mix(MessagesMethods)
 export class TextBaseGuildChannel extends BaseGuildChannel {}
 
-export default function channelFrom(data: APIChannelBase<ChannelType>, client: UsingClient): AllChannels {
+export function channelFrom<T extends APIInteractionDataResolvedChannel>(
+	data: T,
+	client: UsingClient,
+): ResolvedChannel<SeyfertChannelMap[T['type'] & keyof SeyfertChannelMap]>;
+export function channelFrom(data: APIChannelBase<ChannelType>, client: UsingClient): AllChannels;
+export function channelFrom(data: APIChannelBase<ChannelType>, client: UsingClient): AllChannels {
+	let channel: AllChannels;
 	switch (data.type) {
 		case ChannelType.GuildStageVoice:
-			return new StageChannel(client, data);
+			channel = Transformers.StageChannel(client, data as APIGuildChannel<ChannelType>);
+			break;
 		case ChannelType.GuildMedia:
-			return new MediaChannel(client, data);
+			channel = Transformers.MediaChannel(client, data as APIGuildChannel<ChannelType>);
+			break;
 		case ChannelType.DM:
-			return new DMChannel(client, data);
+		case ChannelType.GroupDM:
+			channel = Transformers.DMChannel(client, data);
+			break;
 		case ChannelType.GuildForum:
-			return new ForumChannel(client, data);
+			channel = Transformers.ForumChannel(client, data as APIGuildChannel<ChannelType>);
+			break;
 		case ChannelType.AnnouncementThread:
 		case ChannelType.PrivateThread:
 		case ChannelType.PublicThread:
-			return new ThreadChannel(client, data);
+			channel = Transformers.ThreadChannel(client, data);
+			break;
 		case ChannelType.GuildDirectory:
-			return new DirectoryChannel(client, data);
+			channel = Transformers.DirectoryChannel(client, data as APIGuildChannel<ChannelType>);
+			break;
 		case ChannelType.GuildVoice:
-			return new VoiceChannel(client, data);
+			channel = Transformers.VoiceChannel(client, data as APIGuildChannel<ChannelType>);
+			break;
 		case ChannelType.GuildText:
-			return new TextGuildChannel(client, data as APIGuildChannel<ChannelType>);
+			channel = Transformers.TextGuildChannel(client, data as APIGuildChannel<ChannelType>);
+			break;
 		case ChannelType.GuildCategory:
-			return new CategoryChannel(client, data);
+			channel = Transformers.CategoryChannel(client, data);
+			break;
 		case ChannelType.GuildAnnouncement:
-			return new NewsChannel(client, data);
-		default:
+			channel = Transformers.NewsChannel(client, data as APIGuildChannel<ChannelType>);
+			break;
+		default: {
 			if ('guild_id' in data) {
-				return new BaseGuildChannel(client, data as APIGuildChannel<ChannelType>);
+				channel = Transformers.BaseGuildChannel(client, data as APIGuildChannel<ChannelType>);
+			} else {
+				channel = Transformers.BaseChannel(client, data);
 			}
-			return new BaseChannel(client, data);
+		}
 	}
+	if (channel.isGuild() && 'permissions' in data && typeof data.permissions === 'string') {
+		const appPermissions =
+			'app_permissions' in data && typeof data.app_permissions === 'string'
+				? data.app_permissions
+				: 'appPermissions' in data
+					? (data.appPermissions as unknown)
+					: undefined;
+		Object.assign(channel, {
+			permissions: new PermissionsBitField(BigInt(data.permissions)),
+			...(typeof appPermissions === 'string'
+				? { appPermissions: new PermissionsBitField(BigInt(appPermissions)) }
+				: {}),
+		});
+	}
+	return channel;
 }
 
 export interface TopicableGuildChannel extends BaseChannel<ChannelType> {}
@@ -352,14 +510,21 @@ export class ThreadOnlyMethods extends DiscordBase {
 		return this.edit({ default_thread_rate_limit_per_user: rate }, reason);
 	}
 
-	async thread(body: RESTPostAPIGuildForumThreadsJSONBody, reason?: string) {
+	/**
+	 * Create a new thread.
+	 * @param body After name, at least one of the following properties must be provided: any content of `message` or `files`.
+	 * @param reason The reason for creating the thread, shows up on audit logs.
+	 * @returns A promise that resolves with the created thread.
+	 */
+	thread(body: ThreadOnlyCreateBodyRequest, reason?: string): Promise<ThreadChannelStructure> {
 		return this.client.channels.thread(this.id, body, reason);
 	}
 }
 
-export interface VoiceChannelMethods extends BaseChannel<ChannelType> {}
-export class VoiceChannelMethods extends DiscordBase {
+export interface VoiceChannelMethods extends BaseChannel<ChannelType> {
 	guildId?: string;
+}
+export class VoiceChannelMethods extends DiscordBase {
 	setBitrate(bitrate: number | null, reason?: string) {
 		return this.edit({ bitrate }, reason);
 	}
@@ -376,29 +541,23 @@ export class VoiceChannelMethods extends DiscordBase {
 		return this.edit({ video_quality_mode: VideoQualityMode[quality] }, reason);
 	}
 
-	setVoiceState(status: string | null = null) {
+	setVoiceStatus(status: string | null = null) {
 		return this.client.channels.setVoiceStatus(this.id, status);
 	}
 
-	async states() {
-		if (!this.guildId) return [];
-		const states = await this.cache.voiceStates?.values(this.guildId);
-		if (!states?.length) return [];
-		const filter = states.filter(state => state.channelId === this.id);
-		return filter;
+	states(): ReturnCache<VoiceStateStructure[]> {
+		if (!this.guildId) return this.cache.adapter.isAsync ? (Promise.resolve([]) as never) : [];
+		return fakePromise(
+			this.cache.voiceStates?.values(this.guildId) ??
+				(this.cache.adapter.isAsync ? (Promise.resolve([]) as never) : []),
+		).then(states => {
+			return states.filter(state => state.channelId === this.id);
+		});
 	}
 
-	public async members(force?: boolean) {
-		const collection = new Collection<string, GuildMember>();
-
+	public async members(force?: boolean): Promise<GuildMemberStructure[]> {
 		const states = await this.states();
-
-		for (const state of states) {
-			const member = await state.member(force);
-			collection.set(member.id, member);
-		}
-
-		return collection;
+		return await Promise.all(states.map(state => state.member(force)));
 	}
 }
 
@@ -410,7 +569,7 @@ export class WebhookGuildMethods extends DiscordBase {
 
 	static guild(ctx: MethodContext<{ guildId: string }>) {
 		return {
-			list: () => ctx.client.webhooks.listFromGuild(ctx.guildId),
+			list: (): Promise<WebhookStructure[]> => ctx.client.webhooks.listFromGuild(ctx.guildId),
 		};
 	}
 }
@@ -423,83 +582,86 @@ export class WebhookChannelMethods extends DiscordBase {
 
 	static channel(ctx: MethodContext<{ channelId: string }>) {
 		return {
-			list: () => ctx.client.webhooks.listFromChannel(ctx.channelId),
-			create: async (body: RESTPostAPIChannelWebhookJSONBody) => ctx.client.webhooks.create(ctx.channelId, body),
+			list: (): Promise<WebhookStructure[]> => ctx.client.webhooks.listFromChannel(ctx.channelId),
+			create: (body: RESTPostAPIChannelWebhookJSONBody): Promise<WebhookStructure> =>
+				ctx.client.webhooks.create(ctx.channelId, body),
 		};
 	}
 }
 
 export interface TextGuildChannel
-	extends ObjectToLower<Omit<APITextChannel, 'type' | 'permission_overwrites'>>,
+	extends ObjectToLower<Omit<APITextChannel, 'type' | 'permission_overwrites' | 'guild_id'>>,
 		BaseGuildChannel,
 		TextBaseGuildChannel,
 		WebhookChannelMethods {}
 @mix(TextBaseGuildChannel, WebhookChannelMethods)
 export class TextGuildChannel extends BaseGuildChannel {
 	declare type: ChannelType.GuildText;
-
-	setRatelimitPerUser(rate_limit_per_user: number | null | undefined) {
-		return this.edit({ rate_limit_per_user });
-	}
-
-	setNsfw(nsfw = true, reason?: string) {
-		return this.edit({ nsfw }, reason);
-	}
 }
 
-export interface DMChannel extends ObjectToLower<APIDMChannel>, Omit<MessagesMethods, 'edit'> {}
+export interface DMChannel extends ObjectToLower<APIDMChannel>, MessagesMethods {}
 @mix(MessagesMethods)
-export class DMChannel extends (BaseChannel<ChannelType.DM> as unknown as ToClass<
-	Omit<BaseChannel<ChannelType.DM>, 'edit'>,
-	DMChannel
->) {
+export class DMChannel extends BaseNoEditableChannel<ChannelType.DM> {
 	declare type: ChannelType.DM;
 }
 export interface VoiceChannel
-	extends ObjectToLower<Omit<APIGuildVoiceChannel, 'permission_overwrites'>>,
-		Omit<TextGuildChannel, 'type'>,
+	extends ObjectToLower<Omit<APIGuildVoiceChannel, 'permission_overwrites' | 'guild_id'>>,
+		Omit<TextGuildChannel, keyof BaseGuildChannel>,
 		VoiceChannelMethods,
-		WebhookChannelMethods {}
-@mix(TextGuildChannel, WebhookChannelMethods, VoiceChannelMethods)
-export class VoiceChannel extends BaseChannel<ChannelType.GuildVoice> {
+		WebhookChannelMethods {
+	guildId: string;
+}
+@mix(TextGuildChannel, VoiceChannelMethods)
+export class VoiceChannel extends BaseGuildChannel {
 	declare type: ChannelType.GuildVoice;
 }
 
 export interface StageChannel
-	extends ObjectToLower<Omit<APIGuildStageVoiceChannel, 'type'>>,
+	extends ObjectToLower<Omit<APIGuildStageVoiceChannel, 'type' | 'permission_overwrites' | 'guild_id'>>,
 		TopicableGuildChannel,
-		VoiceChannelMethods {}
+		VoiceChannelMethods {
+	guildId: string;
+	/** Live stage operations for this stage channel. */
+	stage: ReturnType<typeof StageInstance.methods>;
+}
 @mix(TopicableGuildChannel, VoiceChannelMethods)
-export class StageChannel extends BaseChannel<ChannelType> {
+export class StageChannel extends BaseGuildChannel {
 	declare type: ChannelType.GuildStageVoice;
+
+	stage = StageInstance.methods({ client: this.client, channelId: this.id });
 }
 
-export interface MediaChannel extends ObjectToLower<Omit<APIGuildMediaChannel, 'type'>>, ThreadOnlyMethods {}
+export interface MediaChannel
+	extends ObjectToLower<Omit<APIGuildMediaChannel, 'type' | 'permission_overwrites' | 'guild_id'>>,
+		ThreadOnlyMethods {}
 @mix(ThreadOnlyMethods)
-export class MediaChannel extends BaseChannel<ChannelType> {
+export class MediaChannel extends BaseGuildChannel {
 	declare type: ChannelType.GuildMedia;
 }
 
 export interface ForumChannel
-	extends ObjectToLower<APIGuildForumChannel>,
-		Omit<ThreadOnlyMethods, 'type'>,
+	extends ObjectToLower<Omit<APIGuildForumChannel, 'permission_overwrites' | 'guild_id'>>,
+		Omit<ThreadOnlyMethods, 'type' | 'edit' | 'delete'>,
 		WebhookChannelMethods {}
 @mix(ThreadOnlyMethods, WebhookChannelMethods)
-export class ForumChannel extends BaseChannel<ChannelType.GuildForum> {
+export class ForumChannel extends BaseGuildChannel {
 	declare type: ChannelType.GuildForum;
 }
 
 export interface ThreadChannel
-	extends ObjectToLower<Omit<APIThreadChannel, 'permission_overwrites'>>,
-		TextBaseGuildChannel {}
+	extends ObjectToLower<Omit<APIThreadChannel, 'permission_overwrites' | 'guild_id'>>,
+		Omit<TextBaseGuildChannel, 'edit' | 'parentId' | 'delete'> {
+	parentId: string;
+}
 @mix(TextBaseGuildChannel)
 export class ThreadChannel extends BaseChannel<
 	ChannelType.PublicThread | ChannelType.AnnouncementThread | ChannelType.PrivateThread
 > {
 	declare type: ChannelType.PublicThread | ChannelType.AnnouncementThread | ChannelType.PrivateThread;
+
 	webhooks = WebhookChannelMethods.channel({
 		client: this.client,
-		channelId: this.parentId!,
+		channelId: this.parentId,
 	});
 
 	async join() {
@@ -549,7 +711,8 @@ export class ThreadChannel extends BaseChannel<
 	}
 }
 
-export interface CategoryChannel extends ObjectToLower<Omit<APIGuildCategoryChannel, 'permission_overwrites'>> {}
+export interface CategoryChannel
+	extends ObjectToLower<Omit<APIGuildCategoryChannel, 'permission_overwrites' | 'guild_id'>> {}
 
 export class CategoryChannel extends (BaseGuildChannel as unknown as ToClass<
 	Omit<BaseGuildChannel, 'setParent' | 'type'>,
@@ -558,9 +721,12 @@ export class CategoryChannel extends (BaseGuildChannel as unknown as ToClass<
 	declare type: ChannelType.GuildCategory;
 }
 
-export interface NewsChannel extends ObjectToLower<APINewsChannel>, WebhookChannelMethods {}
-@mix(WebhookChannelMethods)
-export class NewsChannel extends BaseChannel<ChannelType.GuildAnnouncement> {
+export interface NewsChannel
+	extends ObjectToLower<Omit<APINewsChannel, 'permission_overwrites' | 'guild_id'>>,
+		WebhookChannelMethods,
+		Omit<TextGuildChannel, keyof BaseGuildChannel> {}
+@mix(TextGuildChannel, WebhookChannelMethods)
+export class NewsChannel extends BaseGuildChannel {
 	declare type: ChannelType.GuildAnnouncement;
 
 	addFollower(webhookChannelId: string, reason?: string) {
@@ -568,33 +734,84 @@ export class NewsChannel extends BaseChannel<ChannelType.GuildAnnouncement> {
 	}
 }
 
+export interface DirectoryChannel
+	extends ObjectToLower<Omit<APIGuildChannel<ChannelType.GuildDirectory>, 'permission_overwrites' | 'guild_id'>> {
+	guildId: string;
+}
+
 export class DirectoryChannel extends BaseChannel<ChannelType.GuildDirectory> {}
 
 export type AllGuildChannels =
-	| TextGuildChannel
-	| VoiceChannel
-	| MediaChannel
-	| ForumChannel
-	| ThreadChannel
-	| CategoryChannel
-	| NewsChannel
-	| DirectoryChannel
-	| StageChannel;
+	| TextGuildChannelStructure
+	| VoiceChannelStructure
+	| MediaChannelStructure
+	| ForumChannelStructure
+	| ThreadChannelStructure
+	| CategoryChannelStructure
+	| NewsChannelStructure
+	| DirectoryChannelStructure
+	| StageChannelStructure;
 
-export type AllTextableChannels = TextGuildChannel | VoiceChannel | DMChannel | NewsChannel | ThreadChannel;
-export type AllGuildTextableChannels = TextGuildChannel | VoiceChannel | NewsChannel | ThreadChannel;
-export type AllGuildVoiceChannels = VoiceChannel | StageChannel;
+export type AllTextableChannels =
+	| TextGuildChannelStructure
+	| VoiceChannelStructure
+	| DMChannelStructure
+	| GroupDMChannelStructure
+	| NewsChannelStructure
+	| ThreadChannelStructure;
+export type AllGuildTextableChannels =
+	| TextGuildChannelStructure
+	| VoiceChannelStructure
+	| NewsChannelStructure
+	| ThreadChannelStructure;
+export type AllGuildVoiceChannels = VoiceChannelStructure | StageChannelStructure;
+export type AllNamedChannels =
+	| AllGuildChannels
+	| BaseGuildChannelStructure
+	| (GroupDMChannelStructure & { name: string })
+	| (BaseChannelStructure & { name: string });
 
 export type AllChannels =
-	| BaseChannel<ChannelType>
-	| BaseGuildChannel
-	| TextGuildChannel
-	| DMChannel
-	| VoiceChannel
-	| MediaChannel
-	| ForumChannel
-	| ThreadChannel
-	| CategoryChannel
-	| NewsChannel
-	| DirectoryChannel
-	| StageChannel;
+	| BaseChannelStructure
+	| BaseGuildChannelStructure
+	| TextGuildChannelStructure
+	| DMChannelStructure
+	| GroupDMChannelStructure
+	| VoiceChannelStructure
+	| MediaChannelStructure
+	| ForumChannelStructure
+	| ThreadChannelStructure
+	| CategoryChannelStructure
+	| NewsChannelStructure
+	| DirectoryChannelStructure
+	| StageChannelStructure;
+
+export interface ResolvedChannelPermissions {
+	/** Computed permissions for the invoking user in the resolved guild channel. */
+	permissions: PermissionsBitField;
+	/** Computed permissions for the bot user in the resolved guild channel. */
+	appPermissions?: PermissionsBitField;
+}
+
+type WithResolvedChannelPermissions<
+	T extends AllChannels,
+	Permissions extends Partial<ResolvedChannelPermissions>,
+> = T extends AllGuildChannels | BaseGuildChannelStructure ? T & Permissions : T;
+
+export type ResolvedChannel<T extends AllChannels = SeyfertChannelMap[keyof SeyfertChannelMap]> =
+	WithResolvedChannelPermissions<T, ResolvedChannelPermissions>;
+
+export type MaybeResolvedChannel<T extends AllChannels = SeyfertChannelMap[keyof SeyfertChannelMap]> =
+	WithResolvedChannelPermissions<T, Partial<ResolvedChannelPermissions>>;
+
+export type GuildChannelTypes =
+	| ChannelType.GuildAnnouncement
+	| ChannelType.GuildVoice
+	| ChannelType.GuildText
+	| ChannelType.GuildStageVoice
+	| ChannelType.GuildForum
+	| ChannelType.GuildMedia
+	| ChannelType.GuildCategory
+	| ChannelType.AnnouncementThread
+	| ChannelType.PrivateThread
+	| ChannelType.PublicThread;

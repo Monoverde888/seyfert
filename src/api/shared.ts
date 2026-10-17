@@ -1,9 +1,12 @@
-import type { MakeRequired } from '../common';
+import type { Awaitable, MakeRequired } from '../common';
 
 export * from './api';
 export * from './utils/constants';
 export * from './utils/types';
 export { calculateUserDefaultAvatarIndex } from './utils/utils';
+
+/** JSON body accepted by the REST transport, including top-level bulk arrays. */
+export type ApiRequestBody = Record<string, any> | readonly unknown[];
 
 export interface ApiHandlerOptions {
 	baseUrl?: string;
@@ -22,13 +25,13 @@ export interface ApiHandlerInternalOptions extends MakeRequired<ApiHandlerOption
 
 export interface RawFile {
 	contentType?: string;
-	data: Buffer | Uint8Array | boolean | number | string;
+	data: ArrayBuffer | Buffer | Uint8Array | Uint8ClampedArray | boolean | number | string;
 	key?: string;
-	name: string;
+	filename: string;
 }
 
 export interface ApiRequestOptions {
-	body?: Record<string, any>;
+	body?: ApiRequestBody;
 	query?: Record<string, any>;
 	files?: RawFile[];
 	auth?: boolean;
@@ -40,3 +43,39 @@ export interface ApiRequestOptions {
 }
 
 export type HttpMethods = 'GET' | 'DELETE' | 'PUT' | 'POST' | 'PATCH';
+
+export interface RestObserverRequestPayload<TClient = unknown> {
+	readonly client: TClient;
+	readonly method: HttpMethods;
+	readonly url: `/${string}`;
+	readonly request: Readonly<ApiRequestOptions>;
+}
+
+export interface RestObserverSuccessPayload<TClient = unknown> extends RestObserverRequestPayload<TClient> {
+	readonly response: Response;
+}
+
+export interface RestObserverFailPayload<TClient = unknown> extends RestObserverRequestPayload<TClient> {
+	readonly error: unknown;
+	readonly statusCode?: number;
+}
+
+export interface RestObserverRatelimitPayload<TClient = unknown> extends RestObserverRequestPayload<TClient> {
+	readonly response: Response;
+}
+
+export interface RestObserver<TClient = unknown> {
+	onRequest?(payload: RestObserverRequestPayload<TClient>): Awaitable<unknown>;
+	onSuccess?(payload: RestObserverSuccessPayload<TClient>): Awaitable<unknown>;
+	onFail?(payload: RestObserverFailPayload<TClient>): Awaitable<unknown>;
+	onRatelimit?(payload: RestObserverRatelimitPayload<TClient>): Awaitable<unknown>;
+}
+
+export interface RestObserverEntry<TClient = unknown> {
+	readonly plugin?: string;
+	readonly observer: RestObserver<TClient>;
+}
+
+export interface RestObserveOptions {}
+
+export type RestObserverDisposer = () => void;
